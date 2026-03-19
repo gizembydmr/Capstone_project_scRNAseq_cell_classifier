@@ -97,3 +97,15 @@ Script: `add_label_hierarchy.py`
   - `cell_type_level_3`
 
 **Example:**
+CD8+ Cytotoxic T
+→ Level 1: T cell
+→ Level 2: CD8 T
+→ Level 3: CD8 cytotoxic T
+
+**Why:**
+
+This enables modeling at different biological resolutions (e.g., general cell types vs detailed subtypes).
+
+## Final Output
+
+The final processed dataset: `pbmc68k_annotated_with_levels.h5ad`
