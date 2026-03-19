@@ -11,6 +11,7 @@ https://github.com/10XGenomics/single-cell-3prime-paper/tree/master/pbmc68k_anal
 
 Based on:
 Zheng et al., 2017 – *Massively parallel digital transcriptional profiling of single cells*
+https://www.nature.com/articles/ncomms14049 
 
 ---
 
