@@ -106,6 +106,7 @@ CD8+ Cytotoxic T
 
 → Level 3: CD8 cytotoxic T
 
+---
 
 ### 5. Training preprocessing
 
