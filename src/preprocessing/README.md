@@ -99,14 +99,74 @@ Script: `add_label_hierarchy.py`
 
 **Example:**
 CD8+ Cytotoxic T
+
 → Level 1: T cell
+
 → Level 2: CD8 T
+
 → Level 3: CD8 cytotoxic T
 
-**Why:**
 
-This enables modeling at different biological resolutions (e.g., general cell types vs detailed subtypes).
+### 5. Training preprocessing
 
-## Final Output
+Script: `preprocess_train.py`
+
+**Input:**
+- `pbmc68k_annotated_with_levels.h5ad`
+
+**Outputs:**
+- `pbmc68k_preprocessed_for_training.h5ad`
+- `pbmc68k_hvg_list.csv`
+
+**What it does:**
+- Computes quality control (QC) metrics
+- Applies basic cell filtering (low counts / low detected genes)
+- Removes genes with no expression
+- Normalizes counts for sequencing depth (median scaling)
+- Applies log transformation (`log1p`)
+- Selects highly variable genes (HVGs)
+
+**Notes:**
+- Gene identifiers are Ensembl IDs (`adata.var_names`)
+- Gene symbols are stored in `adata.var["gene_symbol"]`
+- HVG selection and gene alignment are based on Ensembl IDs
+
+
+### `pbmc68k_preprocessed_for_training.h5ad`
+
+This is the **main dataset** used by all downstream tasks.
+
+### Contains:
+
+- `adata.X`  
+  → HVG-filtered, normalized, log-transformed matrix (ML input)
+
+- `adata.layers["counts"]`  
+  → raw counts (original data)
+
+- `adata.raw`  
+  → full gene space (normalized + log-transformed, before HVG filtering)
+
+- `adata.obs`  
+  → cell metadata (labels, QC metrics)
+
+- `adata.var`  
+  → gene metadata (HVGs only)
+
+- `adata.uns`  
+  → preprocessing metadata + HVG information
+
+---
+
+## HVG Reference File
+
+### `pbmc68k_hvg_list.csv`
+
+Columns:
+- `gene_order` → exact feature order used in training
+- `ensembl_id` → primary identifier (used for alignment)
+- `gene_symbol` → optional readable label
+
+---
 
 The final processed dataset: `pbmc68k_annotated_with_levels.h5ad`
