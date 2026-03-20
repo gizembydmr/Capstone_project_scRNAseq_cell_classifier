@@ -170,4 +170,10 @@ Columns:
 
 ---
 
-The final processed dataset: `pbmc68k_annotated_with_levels.h5ad` can be found in data folder
+## You can find in data folder:
+
+The dataset with raw counts: `pbmc68k_annotated_with_levels.h5ad` 
+
+The final preprocessed dataset: `pbmc68k_preprocessed_for_training.h5ad` 
+
+The HGV reference file: `pbmc68k_hvg_list.csv` 
