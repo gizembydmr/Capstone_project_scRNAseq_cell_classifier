@@ -159,7 +159,54 @@ This is the **main dataset** used by all downstream tasks.
 
 ---
 
-## HVG Reference File
+### 6. Inference preprocessing
+
+Script: `preprocess_inference.py`
+
+**Input:**
+- `pbmc68k_annotated_with_levels.h5ad`
+
+**Output:**
+- `pbmc68k_preprocessed_for_inference.h5ad`
+
+**What it does:**
+- Computes quality control (QC) metrics
+- Applies basic cell filtering (low counts / low detected genes)
+- Removes genes with no expression
+- Normalizes counts for sequencing depth (median scaling)
+- Applies log transformation (`log1p`)
+
+**Notes:**
+- This script follows the same preprocessing logic as training preprocessing
+- No HVG selection is performed during inference
+- Gene selection is enforced later using the training HVG reference file
+
+---
+
+### 7. Gene alignment
+
+Script: `gene_alignment.py`
+
+**Input:**
+- `pbmc68k_preprocessed_for_inference.h5ad`
+- `pbmc68k_hvg_list.csv`
+
+**Output:**
+- `pbmc68k_aligned_for_inference.h5ad`
+
+**What it does:**
+- Matches genes between inference input and training reference using Ensembl IDs
+- Reorders genes according to the exact training gene order
+- Fills missing training genes with zero values
+- Removes extra genes not used during training
+
+**Why this step is necessary:**
+- The trained model expects the same feature set and the same gene order used during training
+- This step guarantees consistency between training and inference inputs
+
+---
+
+## HGV Reference File
 
 ### `pbmc68k_hvg_list.csv`
 
