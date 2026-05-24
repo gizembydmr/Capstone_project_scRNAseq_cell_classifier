@@ -3,14 +3,14 @@ pipeline.py
 ===========
 Inference pipeline for the Cell Type Prediction Platform.
 
-Orchestrates all analysis steps in order and passes outputs between modules:
+Orchestrates all analysis steps in order:
 
-    1. Load data          →  data_loader.py         (İrem)
-    2. Validate data      →  data_validation.py     (Nadira)
-    3. Preprocess         →  preprocess_inference.py (Zeynep)
-    4. Gene alignment     →  gene_alignment.py       (Zeynep)
-    5. Run prediction     →  model.py                (Barış)
-    6. PCA + UMAP         →  pca_umap.py             (Gülsu)
+    1. Load data          →  data_loader.py
+    2. Validate data      →  data_validation.py
+    3. Preprocess         →  preprocess_inference.py
+    4. Gene alignment     →  gene_alignment.py
+    5. Run prediction     →  model.py
+    6. PCA + UMAP         →  pca_umap.py
     7. Export results     →  (export helpers below)
 
 Usage:
@@ -19,8 +19,8 @@ Usage:
     result = run_pipeline(
         filepath="data/sample.h5ad",
         tissue="pbmc",
-        output_dir="results/",          # optional – set to export files
-        progress_callback=print,        # optional – receives status strings
+        output_dir="results/",          # optional
+        progress_callback=print,        # optional — receives status strings
     )
 
     if result.success:
@@ -32,8 +32,9 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import io
+import importlib
+import sys
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,29 +43,31 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Lazy imports of sibling modules
-# Each module is imported inside the step that needs it so that the pipeline
-# can still run partial flows if some teammate modules are not yet implemented.
+# Module import helper
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _import(module_name: str):
-    """Try to import a sibling module; return None if not yet available."""
-    import importlib, sys
-    # Add the directory of this file to sys.path so sibling modules are found
+    """
+    Import a sibling module by name.
+
+    Returns None only when the module file does not exist.
+    Re-raises any other import error so real bugs are not silently swallowed.
+    """
     here = Path(__file__).parent
     if str(here) not in sys.path:
         sys.path.insert(0, str(here))
     try:
         return importlib.import_module(module_name)
-    except ModuleNotFoundError:
-        return None
-    except Exception:
-        return None
+    except ModuleNotFoundError as exc:
+        if module_name in str(exc):
+            return None   # module file not present yet
+        raise             # a dependency of the module is missing — surface the error
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Result type
+# Result types
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -77,34 +80,30 @@ class StepStatus:
 @dataclass
 class PipelineResult:
     """Full result object returned by run_pipeline()."""
+
     success: bool = False
     error: str = ""
-
-    # Per-step statuses for debugging / UI progress display
     steps: List[StepStatus] = field(default_factory=list)
 
-    # Core outputs
-    predictions: Optional[pd.DataFrame] = None   # cell_barcode | predicted_cell_type
-    probabilities: Optional[pd.DataFrame] = None # per-class probability scores (optional)
-    umap_coords: Optional[np.ndarray] = None      # (n_cells, 2)
-    pca_coords: Optional[np.ndarray] = None       # (n_cells, n_pcs)
+    predictions: Optional[pd.DataFrame] = None    # cell_barcode | predicted_cell_type
+    probabilities: Optional[pd.DataFrame] = None  # per-class probability scores
+    umap_coords: Optional[np.ndarray] = None       # (n_cells, 2)
+    pca_coords: Optional[np.ndarray] = None        # (n_cells, n_pcs)
 
-    # Data snapshots (for GUI / downstream analysis)
-    adata: Optional[object] = None                # preprocessed AnnData
+    adata: Optional[object] = None                 # preprocessed AnnData
     n_cells: int = 0
     n_genes: int = 0
     tissue: str = ""
 
-    # Paths of exported files (populated when output_dir is given)
     exported_files: Dict[str, Path] = field(default_factory=dict)
 
     def summary(self) -> str:
         lines = []
-        status_icon = "✅" if self.success else "❌"
-        lines.append(f"{status_icon} Pipeline {'succeeded' if self.success else 'failed'}")
+        icon = "OK" if self.success else "FAIL"
+        lines.append(f"[{icon}] Pipeline {'succeeded' if self.success else 'failed'}")
         for s in self.steps:
-            icon = "✅" if s.success else "❌"
-            lines.append(f"  {icon} {s.name}: {s.message}")
+            step_icon = "+" if s.success else "-"
+            lines.append(f"  [{step_icon}] {s.name}: {s.message}")
         if not self.success:
             lines.append(f"\n  Error: {self.error}")
         return "\n".join(lines)
@@ -132,7 +131,7 @@ def run_pipeline(
     output_dir : str or Path, optional
         If provided, results (CSV + plots) are exported here.
     progress_callback : callable, optional
-        Called with a status string at each step (for UI progress bars).
+        Called with a status string at each step.
 
     Returns
     -------
@@ -148,7 +147,7 @@ def run_pipeline(
     # ══════════════════════════════════════════════════════════════════════════
     # STEP 1 — Load data
     # ══════════════════════════════════════════════════════════════════════════
-    _log("Loading dataset…")
+    _log("Loading dataset...")
     try:
         loader = _import("data_loader")
         if loader is None:
@@ -159,13 +158,12 @@ def run_pipeline(
             raise ValueError(load_res.error)
 
         adata = load_res.adata
-        result.steps.append(StepStatus(
-            "Load",
-            True,
-            f"{load_res.n_cells:,} cells × {load_res.n_genes:,} genes [{load_res.file_format}]",
-        ))
         result.n_cells = load_res.n_cells
         result.n_genes = load_res.n_genes
+        result.steps.append(StepStatus(
+            "Load", True,
+            f"{load_res.n_cells:,} cells x {load_res.n_genes:,} genes [{load_res.file_format}]",
+        ))
 
     except Exception as exc:
         result.steps.append(StepStatus("Load", False, str(exc)))
@@ -175,20 +173,18 @@ def run_pipeline(
     # ══════════════════════════════════════════════════════════════════════════
     # STEP 2 — Validate data
     # ══════════════════════════════════════════════════════════════════════════
-    _log("Validating data…")
+    _log("Validating data...")
     try:
         validator = _import("data_validation")
         if validator is None:
             raise ImportError("data_validation.py not found in project directory.")
 
-        val_res = validator.validate_file(filepath)
+        val_res = validator.validate_adata(adata)
         if not val_res.is_valid:
             raise ValueError("\n".join(val_res.errors))
 
-        warnings_str = ""
-        if val_res.warnings:
-            warnings_str = f" | {len(val_res.warnings)} warning(s)"
-        result.steps.append(StepStatus("Validate", True, f"All checks passed{warnings_str}"))
+        warn_note = f" | {len(val_res.warnings)} warning(s)" if val_res.warnings else ""
+        result.steps.append(StepStatus("Validate", True, f"All checks passed{warn_note}"))
 
     except Exception as exc:
         result.steps.append(StepStatus("Validate", False, str(exc)))
@@ -196,20 +192,19 @@ def run_pipeline(
         return result
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STEP 3 — Preprocess  (Zeynep: preprocess_inference.py)
+    # STEP 3 — Preprocess
     # ══════════════════════════════════════════════════════════════════════════
-    _log("Preprocessing…")
+    _log("Preprocessing...")
     try:
         preprocess = _import("preprocess_inference")
         if preprocess is not None and hasattr(preprocess, "preprocess"):
             adata = preprocess.preprocess(adata)
             result.steps.append(StepStatus("Preprocess", True, "Normalisation + HVG selection done"))
         else:
-            # Fallback: basic preprocessing with scanpy
             adata = _fallback_preprocess(adata)
             result.steps.append(StepStatus(
                 "Preprocess", True,
-                "preprocess_inference.py not yet available — used built-in fallback"
+                "preprocess_inference.py not available — used built-in fallback",
             ))
     except Exception as exc:
         result.steps.append(StepStatus("Preprocess", False, str(exc)))
@@ -217,53 +212,47 @@ def run_pipeline(
         return result
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STEP 4 — Gene alignment  (Zeynep: gene_alignment.py)
+    # STEP 4 — Gene alignment
     # ══════════════════════════════════════════════════════════════════════════
-    _log("Aligning genes to model reference…")
+    _log("Aligning genes to model reference...")
     try:
         gene_align = _import("gene_alignment")
         if gene_align is not None and hasattr(gene_align, "align_genes"):
             adata = gene_align.align_genes(adata, tissue=tissue)
-            result.steps.append(StepStatus("Gene Alignment", True, f"Aligned to {tissue} reference gene set"))
+            result.steps.append(StepStatus(
+                "Gene Alignment", True, f"Aligned to {tissue} reference gene set"
+            ))
         else:
             result.steps.append(StepStatus(
                 "Gene Alignment", True,
-                "gene_alignment.py not yet available — skipped (genes used as-is)"
+                "gene_alignment.py not available — genes used as-is",
             ))
     except Exception as exc:
-        # Gene alignment failure is non-fatal if we can still proceed
-        result.steps.append(StepStatus("Gene Alignment", False, f"Warning: {exc} — continuing with available genes"))
+        result.steps.append(StepStatus(
+            "Gene Alignment", False, f"Warning: {exc} — continuing with available genes"
+        ))
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STEP 5 — Prediction  (Barış: model.py)
+    # STEP 5 — Prediction
     # ══════════════════════════════════════════════════════════════════════════
-    _log("Running cell-type prediction…")
+    _log("Running cell-type prediction...")
     try:
         model_mod = _import("model")
         if model_mod is not None and hasattr(model_mod, "predict"):
             pred_result = model_mod.predict(adata, tissue=tissue)
-            # Expected: dict with "labels" (array) and optionally "probabilities" (DataFrame)
             predicted_labels = pred_result["labels"]
-            result.probabilities = pred_result.get("probabilities", None)
+            result.probabilities = pred_result.get("probabilities")
+            step_msg = f"{len(pd.Series(predicted_labels).unique())} cell types predicted"
         else:
-            # Fallback: placeholder labels so downstream steps can still run
             predicted_labels = _fallback_predict(adata, tissue)
-            result.steps.append(StepStatus(
-                "Predict", True,
-                "model.py not yet available — demo predictions used"
-            ))
+            step_msg = "model.py not available — demo predictions used"
 
         result.predictions = pd.DataFrame({
             "cell_barcode": adata.obs_names.tolist(),
             "predicted_cell_type": predicted_labels,
         })
         adata.obs["predicted_cell_type"] = predicted_labels
-
-        cell_type_counts = pd.Series(predicted_labels).value_counts()
-        result.steps.append(StepStatus(
-            "Predict", True,
-            f"{len(cell_type_counts)} cell types predicted"
-        ))
+        result.steps.append(StepStatus("Predict", True, step_msg))
 
     except Exception as exc:
         result.steps.append(StepStatus("Predict", False, str(exc)))
@@ -271,21 +260,20 @@ def run_pipeline(
         return result
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STEP 6 — PCA + UMAP  (Gülsu: pca_umap.py)
+    # STEP 6 — PCA + UMAP
     # ══════════════════════════════════════════════════════════════════════════
-    _log("Computing PCA and UMAP…")
+    _log("Computing PCA and UMAP...")
     try:
         pca_umap_mod = _import("pca_umap")
         if pca_umap_mod is not None and hasattr(pca_umap_mod, "compute"):
             coords = pca_umap_mod.compute(adata)
-            result.pca_coords  = coords.get("pca")
+            result.pca_coords = coords.get("pca")
             result.umap_coords = coords.get("umap")
             result.steps.append(StepStatus("PCA + UMAP", True, "Embeddings computed"))
         else:
             result.pca_coords, result.umap_coords = _fallback_pca_umap(adata)
             result.steps.append(StepStatus(
-                "PCA + UMAP", True,
-                "pca_umap.py not yet available — used built-in fallback"
+                "PCA + UMAP", True, "pca_umap.py not available — used built-in fallback"
             ))
     except Exception as exc:
         result.steps.append(StepStatus("PCA + UMAP", False, f"Warning: {exc}"))
@@ -294,16 +282,16 @@ def run_pipeline(
     result.adata = adata
 
     # ══════════════════════════════════════════════════════════════════════════
-    # STEP 7 — Export  (optional)
+    # STEP 7 — Export (optional)
     # ══════════════════════════════════════════════════════════════════════════
     if output_dir is not None:
-        _log("Exporting results…")
+        _log("Exporting results...")
         try:
             exported = export_results(result, output_dir)
             result.exported_files = exported
             result.steps.append(StepStatus(
                 "Export", True,
-                f"{len(exported)} file(s) written to '{output_dir}'"
+                f"{len(exported)} file(s) written to '{output_dir}'",
             ))
         except Exception as exc:
             result.steps.append(StepStatus("Export", False, str(exc)))
@@ -317,34 +305,23 @@ def run_pipeline(
 # Export helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def export_results(
-    result: PipelineResult,
-    output_dir: str | Path,
-) -> Dict[str, Path]:
+def export_results(result: PipelineResult, output_dir: str | Path) -> Dict[str, Path]:
     """
-    Export prediction results and plots to disk.
+    Export predictions and plots to disk.
 
     Writes:
-        predictions.csv       — cell barcode + predicted cell type (+ probabilities if available)
-        umap_plot.png         — UMAP scatter coloured by predicted cell type
-        cell_type_dist.png    — horizontal bar chart of cell type counts
-
-    Parameters
-    ----------
-    result : PipelineResult
-        A completed pipeline result.
-    output_dir : str or Path
-        Directory to write files into (created if it doesn't exist).
+        predictions.csv          — cell barcode + predicted cell type
+        umap_plot.png            — UMAP scatter coloured by cell type
+        cell_type_distribution.png — horizontal bar chart of cell type counts
 
     Returns
     -------
-    dict mapping filename → Path of written file
+    dict mapping filename key -> Path of written file
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     exported: Dict[str, Path] = {}
 
-    # ── CSV ──────────────────────────────────────────────────────────────────
     if result.predictions is not None:
         df = result.predictions.copy()
         if result.probabilities is not None:
@@ -353,13 +330,11 @@ def export_results(
         df.to_csv(csv_path, index=False)
         exported["predictions_csv"] = csv_path
 
-    # ── UMAP plot ─────────────────────────────────────────────────────────────
     if result.umap_coords is not None and result.predictions is not None:
         umap_path = out / "umap_plot.png"
         _export_umap(result, umap_path)
         exported["umap_plot"] = umap_path
 
-    # ── Cell-type distribution bar chart ─────────────────────────────────────
     if result.predictions is not None:
         dist_path = out / "cell_type_distribution.png"
         _export_distribution(result, dist_path)
@@ -369,10 +344,7 @@ def export_results(
 
 
 def export_predictions_csv(result: PipelineResult) -> bytes:
-    """
-    Return predictions as CSV bytes (for Streamlit st.download_button).
-    Includes probability columns if available.
-    """
+    """Return predictions as CSV bytes (for Streamlit st.download_button)."""
     if result.predictions is None:
         return b""
     df = result.predictions.copy()
@@ -390,7 +362,7 @@ def export_umap_png(result: PipelineResult, dpi: int = 150) -> bytes:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Internal plot helpers
+# Plot helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 _PALETTE = [
@@ -429,7 +401,7 @@ def _export_umap(result: PipelineResult, dest, dpi: int = 150) -> None:
     ax.set_ylabel("UMAP 2", fontsize=10, color="#8b949e")
     ax.tick_params(colors="#8b949e", labelsize=8)
     ax.spines[:].set_color("#21262d")
-    ax.set_title(f"UMAP · {result.tissue.upper()}", fontsize=12, color="#e6edf3", pad=10)
+    ax.set_title(f"UMAP - {result.tissue.upper()}", fontsize=12, color="#e6edf3", pad=10)
     plt.tight_layout()
     fig.savefig(dest, dpi=dpi, facecolor="#0d1117")
     plt.close(fig)
@@ -469,19 +441,18 @@ def _export_distribution(result: PipelineResult, dest, dpi: int = 150) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fallback implementations
-# (used when a teammate's module is not yet available)
+# Fallback implementations (used when a module is not yet available)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _TISSUE_CELL_TYPES: Dict[str, List[str]] = {
     "pbmc":  ["B cells", "T cells (CD4+)", "T cells (CD8+)", "NK cells",
-               "Monocytes (Classical)", "Monocytes (Non-Classical)", "Dendritic Cells"],
+              "Monocytes (Classical)", "Monocytes (Non-Classical)", "Dendritic Cells"],
     "lung":  ["AT1 cells", "AT2 cells", "Club cells", "Ciliated cells",
-               "Endothelial cells", "Fibroblasts", "Macrophages", "T cells"],
+              "Endothelial cells", "Fibroblasts", "Macrophages", "T cells"],
     "liver": ["Hepatocytes", "Cholangiocytes", "Kupffer cells",
-               "Hepatic Stellate cells", "Endothelial cells", "NK cells"],
+              "Hepatic Stellate cells", "Endothelial cells", "NK cells"],
     "brain": ["Neurons (Excitatory)", "Neurons (Inhibitory)", "Astrocytes",
-               "Oligodendrocytes", "OPC", "Microglia", "Endothelial cells"],
+              "Oligodendrocytes", "OPC", "Microglia", "Endothelial cells"],
 }
 
 
@@ -501,7 +472,7 @@ def _fallback_preprocess(adata):
         n_hvg = min(2000, adata.n_vars)
         sc.pp.highly_variable_genes(adata, n_top_genes=n_hvg, flavor="seurat")
     except Exception:
-        pass  # Return adata as-is if scanpy unavailable
+        pass
     return adata
 
 
@@ -528,7 +499,6 @@ def _fallback_pca_umap(adata):
         sc.tl.umap(adata)
         umap_coords = adata.obsm.get("X_umap")
     except Exception:
-        # Last-resort: random 2D coords
         rng = np.random.default_rng(0)
         umap_coords = rng.standard_normal((adata.n_obs, 2))
 
@@ -540,8 +510,6 @@ def _fallback_pca_umap(adata):
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    import sys
-
     if len(sys.argv) < 3:
         print("Usage: python pipeline.py <filepath> <tissue> [output_dir]")
         print("       tissue: pbmc | lung | liver | brain")
