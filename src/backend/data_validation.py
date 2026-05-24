@@ -1,37 +1,36 @@
 """
 data_validation.py
 ==================
-Input data validation module for the Cell Type Prediction Platform.
+Validation module for the Cell Type Prediction Platform.
 
-Validates user-uploaded scRNA-seq datasets in .h5ad, .csv, and .mtx formats
-before passing them to the preprocessing pipeline.
+Primary entry point for the pipeline:
+    validate_adata(adata)  — validates an already-loaded AnnData object
+
+Standalone / CLI entry point:
+    validate_file(filepath)  — loads the file via data_loader, then validates
 
 Checks performed:
-- File format correctness (.h5ad, .csv, .mtx)
-- Matrix dimensionality (must be 2-D, non-empty)
-- Numerical validity (no NaN, no Inf, non-negative counts)
-- Missing or invalid values
-- Duplicate cell barcodes / gene IDs
-- Minimum size requirements
+    - Matrix shape and dimensionality
+    - Minimum cell and gene counts
+    - NaN, Inf, and negative values (sparse-aware)
+    - Duplicate cell barcodes and gene IDs
+    - Matrix density (warns if unexpectedly dense)
 
 Usage:
-    from data_validation import validate_file, ValidationResult
+    from data_validation import validate_adata, ValidationResult
 
-    result = validate_file("path/to/data.h5ad")
+    result = validate_adata(adata)
     if result.is_valid:
-        adata = result.data          # anndata.AnnData object, ready for preprocessing
+        print(f"{result.n_cells} cells x {result.n_genes} genes — OK")
     else:
-        print(result.errors)        # list of human-readable error strings
-        print(result.warnings)      # list of non-fatal warning strings
+        print(result.errors)
 """
 
 from __future__ import annotations
 
-import os
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 
@@ -41,17 +40,13 @@ import numpy as np
 
 @dataclass
 class ValidationResult:
-    """Returned by every validate_* function."""
+    """Returned by validate_adata() and validate_file()."""
 
     is_valid: bool = False
     errors: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
-
-    # Populated on success
-    data: Optional[object] = None          # anndata.AnnData
     n_cells: int = 0
     n_genes: int = 0
-    file_format: str = ""
 
     def add_error(self, msg: str) -> None:
         self.errors.append(msg)
@@ -63,9 +58,11 @@ class ValidationResult:
     def summary(self) -> str:
         lines = []
         if self.is_valid:
-            lines.append(f"✅ Validation passed  |  {self.n_cells:,} cells  ×  {self.n_genes:,} genes  [{self.file_format}]")
+            lines.append(
+                f"Validation passed  |  {self.n_cells:,} cells x {self.n_genes:,} genes"
+            )
         else:
-            lines.append(f"❌ Validation failed  ({len(self.errors)} error(s))")
+            lines.append(f"Validation failed  ({len(self.errors)} error(s))")
         for e in self.errors:
             lines.append(f"   ERROR   : {e}")
         for w in self.warnings:
@@ -74,510 +71,184 @@ class ValidationResult:
 
 
 # ---------------------------------------------------------------------------
-# Constants / thresholds
+# Thresholds
 # ---------------------------------------------------------------------------
 
-SUPPORTED_EXTENSIONS = {".h5ad", ".csv", ".mtx"}
-
-# Absolute minimums – datasets smaller than these are almost certainly corrupt
-# or demo files that won't yield meaningful predictions.
 MIN_CELLS = 10
 MIN_GENES = 50
-
-# A sparse matrix is expected for real scRNA-seq; warn if density is very high
-# (might indicate a non-count / already-normalised matrix was uploaded).
 HIGH_DENSITY_THRESHOLD = 0.8   # fraction of non-zero entries
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Primary entry point (pipeline use)
 # ---------------------------------------------------------------------------
 
-def validate_file(filepath: str | Path) -> ValidationResult:
+def validate_adata(adata) -> ValidationResult:
     """
-    Validate a user-uploaded scRNA-seq file.
+    Validate an already-loaded AnnData object.
+
+    This is the function called by the pipeline (Step 2).
+    It does not reload the file — pass the AnnData returned by data_loader.
 
     Parameters
     ----------
-    filepath : str or Path
-        Path to the uploaded file (.h5ad, .csv, or .mtx).
+    adata : anndata.AnnData
+        Dataset to validate.
 
     Returns
     -------
     ValidationResult
-        .is_valid  → True if all checks pass
-        .errors    → list of blocking error messages
-        .warnings  → list of non-fatal advisory messages
-        .data      → anndata.AnnData object (only set when is_valid is True)
-        .n_cells   → number of cells
-        .n_genes   → number of genes
     """
-    path = Path(filepath)
     result = ValidationResult(is_valid=True)
 
-    # ------------------------------------------------------------------
-    # 1. File existence
-    # ------------------------------------------------------------------
-    if not path.exists():
-        result.add_error(f"File not found: '{path}'")
+    if adata.X is None:
+        result.add_error("AnnData has no expression matrix (adata.X is None).")
         return result
 
-    if not path.is_file():
-        result.add_error(f"Path is not a file: '{path}'")
-        return result
-
-    # ------------------------------------------------------------------
-    # 2. Format / extension check
-    # ------------------------------------------------------------------
-    ext = path.suffix.lower()
-    if ext not in SUPPORTED_EXTENSIONS:
+    if adata.n_obs == 0 or adata.n_vars == 0:
         result.add_error(
-            f"Unsupported file format '{ext}'. "
-            f"Accepted formats: {', '.join(sorted(SUPPORTED_EXTENSIONS))}."
+            f"Expression matrix is empty ({adata.n_obs} cells x {adata.n_vars} genes)."
         )
         return result
 
-    result.file_format = ext.lstrip(".")
+    if adata.n_obs < MIN_CELLS:
+        result.add_error(
+            f"Dataset contains only {adata.n_obs} cell(s); minimum required is {MIN_CELLS}."
+        )
 
-    # ------------------------------------------------------------------
-    # 3. Non-zero file size
-    # ------------------------------------------------------------------
-    file_size = path.stat().st_size
-    if file_size == 0:
-        result.add_error("File is empty (0 bytes).")
+    if adata.n_vars < MIN_GENES:
+        result.add_error(
+            f"Dataset contains only {adata.n_vars} gene(s); minimum required is {MIN_GENES}."
+        )
+
+    if not result.is_valid:
         return result
 
-    # ------------------------------------------------------------------
-    # 4. Format-specific loading + checks
-    # ------------------------------------------------------------------
-    try:
-        if ext == ".h5ad":
-            _validate_h5ad(path, result)
-        elif ext == ".csv":
-            _validate_csv(path, result)
-        elif ext == ".mtx":
-            _validate_mtx(path, result)
-    except Exception as exc:
-        result.add_error(f"Unexpected error while reading file: {exc}")
-        result.is_valid = False
-        return result
+    _check_numeric(adata.X, result)
+    _check_duplicates(list(adata.obs_names), "cell barcode", result)
+    _check_duplicates(list(adata.var_names), "gene ID", result)
+    _check_density(adata.X, result)
+
+    if result.is_valid:
+        result.n_cells = adata.n_obs
+        result.n_genes = adata.n_vars
 
     return result
 
 
 # ---------------------------------------------------------------------------
-# Format-specific validators
+# Secondary entry point (standalone / CLI use)
 # ---------------------------------------------------------------------------
 
-def _validate_h5ad(path: Path, result: ValidationResult) -> None:
-    """Validate an AnnData .h5ad file."""
-    try:
-        import anndata as ad
-    except ImportError:
-        result.add_error(
-            "Python package 'anndata' is not installed. "
-            "Install it with: pip install anndata"
-        )
-        return
-
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            adata = ad.read_h5ad(path)
-    except Exception as exc:
-        result.add_error(
-            f"Could not read .h5ad file. "
-            f"The file may be corrupt or not a valid AnnData object. "
-            f"Details: {exc}"
-        )
-        return
-
-    _check_anndata(adata, result)
-
-    if result.is_valid:
-        result.data = adata
-        result.n_cells, result.n_genes = adata.shape
-
-
-def _validate_csv(path: Path, result: ValidationResult) -> None:
+def validate_file(filepath: str | Path) -> ValidationResult:
     """
-    Validate a CSV gene-expression matrix.
+    Load a file via data_loader and validate it.
 
-    Expected layout: rows = cells (or genes), columns = genes (or cells).
-    The function accepts both orientations; if genes > cells it warns the user
-    to transpose.
+    This is a convenience wrapper for CLI and testing.
+    The pipeline should call validate_adata() directly to avoid loading twice.
     """
-    try:
-        import pandas as pd
-    except ImportError:
-        result.add_error(
-            "Python package 'pandas' is not installed. "
-            "Install it with: pip install pandas"
-        )
-        return
+    from data_loader import load_file
 
-    try:
-        # Read only a small header first to detect delimiter / encoding issues.
-        sample = pd.read_csv(path, index_col=0, nrows=5)
-    except Exception as exc:
-        result.add_error(
-            f"Could not parse CSV file. "
-            f"Ensure the file uses comma separators and UTF-8 encoding. "
-            f"Details: {exc}"
-        )
-        return
+    path = Path(filepath)
+    result = ValidationResult(is_valid=True)
 
-    if sample.shape[1] == 0:
-        result.add_error(
-            "CSV file appears to have no data columns. "
-            "Expected format: first column = cell/gene IDs, "
-            "remaining columns = gene expression values."
-        )
-        return
+    if not path.exists():
+        result.add_error(f"File not found: '{path}'")
+        return result
 
-    # Full read
-    try:
-        df = pd.read_csv(path, index_col=0)
-    except Exception as exc:
-        result.add_error(f"Failed to fully read CSV file: {exc}")
-        return
+    if path.stat().st_size == 0:
+        result.add_error("File is empty (0 bytes).")
+        return result
 
-    # Convert to numeric only
-    non_numeric_cols = [c for c in df.columns if not pd.api.types.is_numeric_dtype(df[c])]
-    if non_numeric_cols:
-        result.add_error(
-            f"{len(non_numeric_cols)} column(s) contain non-numeric data: "
-            f"{non_numeric_cols[:5]}{'...' if len(non_numeric_cols) > 5 else ''}. "
-            f"All expression values must be numeric."
-        )
-        return
+    load_res = load_file(path)
+    if not load_res.success:
+        result.add_error(f"Could not load file: {load_res.error}")
+        return result
 
-    matrix = df.values
-    row_ids = df.index.tolist()
-    col_ids = df.columns.tolist()
-
-    _check_matrix(matrix, row_ids, col_ids, result)
-
-    if result.is_valid:
-        # Build AnnData so downstream code works uniformly
-        try:
-            import anndata as ad
-            import scipy.sparse as sp
-
-            # Assume rows = cells, columns = genes
-            adata = ad.AnnData(
-                X=sp.csr_matrix(matrix.astype(np.float32)),
-                obs=pd.DataFrame(index=row_ids),
-                var=pd.DataFrame(index=col_ids),
-            )
-            result.data = adata
-            result.n_cells, result.n_genes = adata.shape
-        except ImportError:
-            # anndata not available – store the raw DataFrame instead
-            result.data = df
-            result.n_cells, result.n_genes = df.shape
-            result.add_warning(
-                "Package 'anndata' is not installed; storing raw DataFrame. "
-                "Install anndata for full pipeline compatibility."
-            )
-
-
-def _validate_mtx(path: Path, result: ValidationResult) -> None:
-    """
-    Validate a Matrix Market (.mtx) file.
-
-    Expects the companion files barcodes.tsv / barcodes.tsv.gz and
-    features.tsv / genes.tsv in the same directory (10x Genomics layout).
-    """
-    try:
-        import scipy.io as sio
-    except ImportError:
-        result.add_error(
-            "Python package 'scipy' is not installed. "
-            "Install it with: pip install scipy"
-        )
-        return
-
-    try:
-        matrix = sio.mmread(path).tocsr()
-    except Exception as exc:
-        result.add_error(
-            f"Could not read .mtx file. "
-            f"Ensure the file is a valid Matrix Market format. "
-            f"Details: {exc}"
-        )
-        return
-
-    # Try to load barcodes and features from the same directory (10x layout)
-    parent = path.parent
-    barcode_file = _find_companion(parent, ["barcodes.tsv", "barcodes.tsv.gz"])
-    feature_file = _find_companion(
-        parent, ["features.tsv", "features.tsv.gz", "genes.tsv", "genes.tsv.gz"]
-    )
-
-    import pandas as pd
-
-    if barcode_file is None:
-        result.add_warning(
-            "No barcodes.tsv file found in the same directory. "
-            "Cell barcodes will be auto-generated. "
-            "For best results, place barcodes.tsv alongside the .mtx file."
-        )
-        barcodes = [f"cell_{i}" for i in range(matrix.shape[1])]
-    else:
-        try:
-            barcodes = pd.read_csv(barcode_file, header=None, sep="\t")[0].tolist()
-        except Exception as exc:
-            result.add_error(f"Could not read barcodes file: {exc}")
-            return
-
-    if feature_file is None:
-        result.add_warning(
-            "No features.tsv / genes.tsv file found in the same directory. "
-            "Gene IDs will be auto-generated."
-        )
-        genes = [f"gene_{i}" for i in range(matrix.shape[0])]
-    else:
-        try:
-            feat_df = pd.read_csv(feature_file, header=None, sep="\t")
-            genes = feat_df[0].tolist()  # first column = Ensembl ID or gene symbol
-        except Exception as exc:
-            result.add_error(f"Could not read features file: {exc}")
-            return
-
-    # MTX is stored (genes × cells) in 10x layout – transpose to (cells × genes)
-    matrix_T = matrix.T
-
-    _check_matrix(matrix_T.toarray(), barcodes, genes, result)
-
-    if result.is_valid:
-        try:
-            import anndata as ad
-
-            adata = ad.AnnData(
-                X=matrix_T.astype(np.float32),
-                obs=pd.DataFrame(index=barcodes),
-                var=pd.DataFrame(index=genes),
-            )
-            result.data = adata
-            result.n_cells, result.n_genes = adata.shape
-        except ImportError:
-            result.add_warning(
-                "Package 'anndata' not installed; cannot build AnnData object. "
-                "Install anndata for full pipeline compatibility."
-            )
+    return validate_adata(load_res.adata)
 
 
 # ---------------------------------------------------------------------------
-# Shared matrix checks
+# Internal checks
 # ---------------------------------------------------------------------------
 
-def _check_anndata(adata, result: ValidationResult) -> None:
-    """Run all checks on an already-loaded AnnData object."""
-    import numpy as np
+def _check_numeric(X, result: ValidationResult) -> None:
+    """Check for NaN, Inf, and negative values. Operates on sparse data directly."""
+    import scipy.sparse as sp
 
-    # --- Dimensionality ---
-    if adata.X is None:
-        result.add_error("AnnData object has no expression matrix (adata.X is None).")
-        return
+    data = X.data if sp.issparse(X) else np.asarray(X).ravel()
 
-    if adata.n_obs == 0 or adata.n_vars == 0:
-        result.add_error(
-            f"Expression matrix is empty "
-            f"({adata.n_obs} cells × {adata.n_vars} genes)."
-        )
-        return
-
-    if adata.X.ndim != 2:
-        result.add_error(
-            f"Expression matrix must be 2-dimensional "
-            f"(found {adata.X.ndim}-D array)."
-        )
-        return
-
-    # --- Minimum size ---
-    if adata.n_obs < MIN_CELLS:
-        result.add_error(
-            f"Dataset contains only {adata.n_obs} cell(s); "
-            f"minimum required is {MIN_CELLS}. "
-            f"Predictions are not meaningful on such small datasets."
-        )
-
-    if adata.n_vars < MIN_GENES:
-        result.add_error(
-            f"Dataset contains only {adata.n_vars} gene(s); "
-            f"minimum required is {MIN_GENES}. "
-            f"Ensure the full gene expression matrix was uploaded."
-        )
-
-    if not result.is_valid:
-        return
-
-    # --- Dense array extraction for numeric checks ---
-    try:
-        import scipy.sparse as sp
-        X = adata.X.toarray() if sp.issparse(adata.X) else np.array(adata.X)
-    except Exception as exc:
-        result.add_error(f"Could not convert expression matrix to array: {exc}")
-        return
-
-    _check_numeric(X, result)
-    _check_duplicates(
-        list(adata.obs_names), "cell barcode", result
-    )
-    _check_duplicates(
-        list(adata.var_names), "gene ID", result
-    )
-    _check_density(X, result)
-
-
-def _check_matrix(
-    matrix: np.ndarray,
-    row_ids: list,
-    col_ids: list,
-    result: ValidationResult,
-) -> None:
-    """Run all checks on a raw numpy matrix (cells × genes)."""
-    n_cells, n_genes = matrix.shape
-
-    if n_cells == 0 or n_genes == 0:
-        result.add_error(
-            f"Expression matrix is empty ({n_cells} cells × {n_genes} genes)."
-        )
-        return
-
-    if matrix.ndim != 2:
-        result.add_error(
-            f"Expression matrix must be 2-dimensional "
-            f"(found {matrix.ndim}-D array)."
-        )
-        return
-
-    if n_cells < MIN_CELLS:
-        result.add_error(
-            f"Dataset contains only {n_cells} cell(s); "
-            f"minimum required is {MIN_CELLS}."
-        )
-
-    if n_genes < MIN_GENES:
-        result.add_error(
-            f"Dataset contains only {n_genes} gene(s); "
-            f"minimum required is {MIN_GENES}."
-        )
-
-    if not result.is_valid:
-        return
-
-    _check_numeric(matrix, result)
-    _check_duplicates(row_ids, "cell barcode (row)", result)
-    _check_duplicates(col_ids, "gene ID (column)", result)
-    _check_density(matrix, result)
-
-
-def _check_numeric(X: np.ndarray, result: ValidationResult) -> None:
-    """Ensure matrix contains only finite, non-negative numbers."""
-    nan_count = int(np.sum(np.isnan(X)))
+    nan_count = int(np.sum(np.isnan(data)))
     if nan_count > 0:
         result.add_error(
             f"Expression matrix contains {nan_count:,} NaN value(s). "
-            f"NaN entries indicate missing data and must be resolved before upload. "
-            f"Replace NaN with 0 for absent genes or remove affected cells/genes."
+            f"Replace NaN with 0 or remove affected cells/genes before uploading."
         )
 
-    inf_count = int(np.sum(np.isinf(X)))
+    inf_count = int(np.sum(np.isinf(data)))
     if inf_count > 0:
         result.add_error(
-            f"Expression matrix contains {inf_count:,} infinite value(s). "
-            f"Infinite values are not valid gene expression counts."
+            f"Expression matrix contains {inf_count:,} infinite value(s)."
         )
 
-    neg_count = int(np.sum(X < 0))
+    neg_count = int(np.sum(data < 0))
     if neg_count > 0:
         result.add_error(
             f"Expression matrix contains {neg_count:,} negative value(s). "
-            f"Raw gene expression counts must be non-negative integers. "
-            f"If this is a pre-normalised matrix, ensure it is non-negative."
+            f"Raw UMI counts must be non-negative."
         )
 
-    # Warn if values look like already-normalised floats rather than raw counts
-    if result.is_valid:
-        if X.dtype.kind == 'f':
-            n_non_integer = int(np.sum(X != np.floor(X)))
-            if n_non_integer > 0:
-                fraction = n_non_integer / X.size
-                if fraction > 0.01:   # more than 1 % non-integer values
-                    result.add_warning(
-                        f"{fraction*100:.1f}% of expression values are non-integer. "
-                        f"The platform expects raw UMI count matrices. "
-                        f"If this data is already normalised, preprocessing results may differ."
-                    )
+    if result.is_valid and data.dtype.kind == "f":
+        n_non_integer = int(np.sum(data != np.floor(data)))
+        if n_non_integer / max(data.size, 1) > 0.01:
+            result.add_warning(
+                f"{n_non_integer / data.size * 100:.1f}% of expression values are non-integer. "
+                f"The platform expects raw UMI count matrices; normalised input may affect results."
+            )
 
 
 def _check_duplicates(ids: list, label: str, result: ValidationResult) -> None:
-    """Detect and report duplicated identifiers."""
-    seen = {}
+    """Detect duplicated cell barcodes or gene IDs."""
+    seen: dict = {}
     for idx, item in enumerate(ids):
         seen.setdefault(item, []).append(idx)
 
     duplicates = {k: v for k, v in seen.items() if len(v) > 1}
     if duplicates:
         examples = list(duplicates.items())[:5]
-        example_str = "; ".join(
-            f"'{k}' at rows {v}" for k, v in examples
-        )
+        example_str = "; ".join(f"'{k}' at positions {v}" for k, v in examples)
         result.add_error(
             f"Found {len(duplicates)} duplicate {label}(s). "
-            f"All identifiers must be unique. "
-            f"Examples: {example_str}"
+            f"All identifiers must be unique. Examples: {example_str}"
             + ("  ..." if len(duplicates) > 5 else "")
         )
 
 
-def _check_density(X: np.ndarray, result: ValidationResult) -> None:
-    """Warn if the matrix is unexpectedly dense (may not be raw counts)."""
-    total = X.size
+def _check_density(X, result: ValidationResult) -> None:
+    """Warn if the matrix is unexpectedly dense (may indicate normalised data)."""
+    import scipy.sparse as sp
+
+    if sp.issparse(X):
+        total = X.shape[0] * X.shape[1]
+        non_zero = X.nnz
+    else:
+        total = X.size
+        non_zero = int(np.count_nonzero(X))
+
     if total == 0:
         return
-    non_zero = int(np.count_nonzero(X))
+
     density = non_zero / total
     if density > HIGH_DENSITY_THRESHOLD:
         result.add_warning(
-            f"Expression matrix density is {density*100:.1f}% "
-            f"(fraction of non-zero entries). "
+            f"Matrix density is {density * 100:.1f}% non-zero. "
             f"Raw scRNA-seq count matrices are typically sparse (<50% non-zero). "
-            f"This may indicate that the data has already been normalised or transformed."
+            f"This may indicate already-normalised data."
         )
 
 
 # ---------------------------------------------------------------------------
-# Utility helpers
-# ---------------------------------------------------------------------------
-
-def _find_companion(directory: Path, candidates: list) -> Optional[Path]:
-    """Return the first existing file from a list of candidate names."""
-    for name in candidates:
-        p = directory / name
-        if p.exists():
-            return p
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Convenience wrappers
-# ---------------------------------------------------------------------------
-
-def is_valid_h5ad(filepath: str | Path) -> bool:
-    """Quick boolean check for .h5ad files."""
-    return validate_file(filepath).is_valid
-
-
-def get_validation_errors(filepath: str | Path) -> List[str]:
-    """Return only the list of error strings for a given file."""
-    return validate_file(filepath).errors
-
-
-# ---------------------------------------------------------------------------
-# CLI usage: python data_validation.py <file>
+# CLI:  python data_validation.py <file>
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -587,7 +258,6 @@ if __name__ == "__main__":
         print("Usage: python data_validation.py <path_to_file>")
         sys.exit(1)
 
-    target = sys.argv[1]
-    res = validate_file(target)
+    res = validate_file(sys.argv[1])
     print(res.summary())
     sys.exit(0 if res.is_valid else 1)
