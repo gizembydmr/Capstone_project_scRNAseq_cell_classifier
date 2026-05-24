@@ -206,6 +206,17 @@ def run_pipeline(
                 "Preprocess", True,
                 "preprocess_inference.py not available — used built-in fallback",
             ))
+    except IndexError as exc:
+        if "Positions outside range" in str(exc):
+            msg = (
+                f"Dataset has too few genes ({adata.n_vars}) for QC metrics. "
+                f"scanpy requires at least 500 genes. Add more genes to the input file."
+            )
+        else:
+            msg = str(exc)
+        result.steps.append(StepStatus("Preprocess", False, msg))
+        result.error = f"Preprocessing failed: {msg}"
+        return result
     except Exception as exc:
         result.steps.append(StepStatus("Preprocess", False, str(exc)))
         result.error = f"Preprocessing failed: {exc}"
