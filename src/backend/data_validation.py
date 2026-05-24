@@ -48,6 +48,10 @@ class ValidationResult:
     n_cells: int = 0
     n_genes: int = 0
 
+    # Populated by validate_file() only (not validate_adata).
+    # gui.py reads this to get the loaded AnnData after validation.
+    data: Optional[object] = None
+
     def add_error(self, msg: str) -> None:
         self.errors.append(msg)
         self.is_valid = False
@@ -165,7 +169,10 @@ def validate_file(filepath: str | Path) -> ValidationResult:
         result.add_error(f"Could not load file: {load_res.error}")
         return result
 
-    return validate_adata(load_res.adata)
+    result = validate_adata(load_res.adata)
+    if result.is_valid:
+        result.data = load_res.adata   # gui.py reads vr.data to get the AnnData
+    return result
 
 
 # ---------------------------------------------------------------------------
