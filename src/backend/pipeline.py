@@ -282,10 +282,10 @@ def run_pipeline(
     _log("Computing PCA and UMAP...")
     try:
         pca_umap_mod = _import("pca_umap")
-        if pca_umap_mod is not None and hasattr(pca_umap_mod, "compute"):
-            coords = pca_umap_mod.compute(adata)
-            result.pca_coords = coords.get("pca")
-            result.umap_coords = coords.get("umap")
+        if pca_umap_mod is not None and hasattr(pca_umap_mod, "run_pca_umap"):
+            adata = pca_umap_mod.run_pca_umap(adata)
+            result.pca_coords = adata.obsm.get("X_pca")
+            result.umap_coords = adata.obsm.get("X_umap")
             result.steps.append(StepStatus("PCA + UMAP", True, "Embeddings computed"))
         else:
             result.pca_coords, result.umap_coords = _fallback_pca_umap(adata)
@@ -297,6 +297,8 @@ def run_pipeline(
         # Non-fatal: predictions are still valid without UMAP
 
     result.adata = adata
+    result.n_cells = adata.n_obs
+    result.n_genes = adata.n_vars
 
     # ══════════════════════════════════════════════════════════════════════════
     # STEP 7 — Export (optional)
