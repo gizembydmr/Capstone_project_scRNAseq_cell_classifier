@@ -197,8 +197,8 @@ def run_pipeline(
     _log("Preprocessing...")
     try:
         preprocess = _import("preprocess_inference")
-        if preprocess is not None and hasattr(preprocess, "preprocess"):
-            adata = preprocess.preprocess(adata)
+        if preprocess is not None and hasattr(preprocess, "preprocess_for_inference"):
+            adata = preprocess.preprocess_for_inference(adata)
             result.steps.append(StepStatus("Preprocess", True, "Normalisation + HVG selection done"))
         else:
             adata = _fallback_preprocess(adata)
@@ -217,11 +217,28 @@ def run_pipeline(
     _log("Aligning genes to model reference...")
     try:
         gene_align = _import("gene_alignment")
-        if gene_align is not None and hasattr(gene_align, "align_genes"):
-            adata = gene_align.align_genes(adata, tissue=tissue)
-            result.steps.append(StepStatus(
-                "Gene Alignment", True, f"Aligned to {tissue} reference gene set"
-            ))
+        if gene_align is not None and hasattr(gene_align, "align_genes_to_training"):
+            here = Path(__file__).parent
+            # Look for the HVG reference CSV (team should provide this file)
+            hvg_candidates = [
+                here / "pbmc68k_hvg_list.csv",
+                here / f"{tissue}_hvg_list.csv",
+                here / "hvg_list.csv",
+            ]
+            hvg_csv = next((p for p in hvg_candidates if p.exists()), None)
+
+            if hvg_csv is not None:
+                training_gene_order = gene_align.load_training_gene_order(str(hvg_csv))
+                adata = gene_align.align_genes_to_training(adata, training_gene_order)
+                result.steps.append(StepStatus(
+                    "Gene Alignment", True,
+                    f"Aligned to {tissue} reference ({len(training_gene_order)} genes)",
+                ))
+            else:
+                result.steps.append(StepStatus(
+                    "Gene Alignment", True,
+                    "HVG reference CSV not found — genes used as-is (ask team for pbmc68k_hvg_list.csv)",
+                ))
         else:
             result.steps.append(StepStatus(
                 "Gene Alignment", True,
