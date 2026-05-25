@@ -316,6 +316,9 @@ def _init_state() -> None:
         "n_cells": 0,
         "n_genes": 0,
         "selected_tissue": list(TISSUE_MODELS.keys())[0],
+        "pca_coords": None,
+        "dge_result": None,
+        "dge_groups_done": ("", ""),
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -381,25 +384,33 @@ with col_left:
 
     # ── Validation feedback ───────────────────────────────────────────────────
     if uploaded_file is not None:
-        # Save to a temp file so data_validation can work with it by path
-        tmp_path = Path(f"/tmp/{uploaded_file.name}")
-        tmp_path.write_bytes(uploaded_file.getvalue())
+        # Only re-validate when a new file is uploaded (different name).
+        # Without this check, Streamlit re-runs this block after every rerun()
+        # call and resets run_complete, wiping the results from the screen.
+        new_file = uploaded_file.name != st.session_state.get("last_uploaded_filename", "")
 
-        with st.spinner("Validating file…"):
-            vr: ValidationResult = validate_file(tmp_path)
+        if new_file:
+            tmp_path = Path(f"/tmp/{uploaded_file.name}")
+            tmp_path.write_bytes(uploaded_file.getvalue())
 
-        st.session_state.validation_result = vr
-        st.session_state.validated = vr.is_valid
+            with st.spinner("Validating file…"):
+                vr: ValidationResult = validate_file(tmp_path)
 
-        if vr.is_valid:
-            st.session_state.adata = vr.data
-            st.session_state.n_cells = vr.n_cells
-            st.session_state.n_genes = vr.n_genes
-            # Reset run state when a new file is uploaded
-            st.session_state.run_complete = False
-            st.session_state.predictions = None
-            st.session_state.umap_coords = None
+            st.session_state.validation_result = vr
+            st.session_state.validated = vr.is_valid
+            st.session_state.last_uploaded_filename = uploaded_file.name
 
+            if vr.is_valid:
+                st.session_state.adata = vr.data
+                st.session_state.n_cells = vr.n_cells
+                st.session_state.n_genes = vr.n_genes
+                st.session_state.run_complete = False
+                st.session_state.predictions = None
+                st.session_state.umap_coords = None
+
+        # Always show validation result from session state
+        vr = st.session_state.get("validation_result")
+        if vr and vr.is_valid:
             st.markdown(
                 f'<div class="val-ok">✅ &nbsp;File accepted &nbsp;|&nbsp; '
                 f'{vr.n_cells:,} cells &nbsp;×&nbsp; {vr.n_genes:,} genes</div>',
@@ -407,9 +418,7 @@ with col_left:
             )
             for w in vr.warnings:
                 st.markdown(f'<div class="val-warning">⚠ &nbsp;{w}</div>', unsafe_allow_html=True)
-        else:
-            st.session_state.validated = False
-            st.session_state.adata = None
+        elif vr:
             for e in vr.errors:
                 st.markdown(f'<div class="val-error">✖ &nbsp;{e}</div>', unsafe_allow_html=True)
             for w in vr.warnings:
@@ -455,145 +464,45 @@ with col_left:
 
     # ── Progress & Pipeline ───────────────────────────────────────────────────
     if run_clicked and st.session_state.validated:
+        st.session_state.dge_result = None
+        st.session_state.dge_groups_done = ("", "")
+
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        steps = [
-            (0.08,  "Loading dataset…"),
-            (0.20,  "Filtering low-quality cells…"),
-            (0.35,  "Normalising expression values…"),
-            (0.50,  "Selecting highly variable genes…"),
-            (0.65,  "Running PCA…"),
-            (0.80,  "Applying trained classifier…"),
-            (0.90,  "Computing UMAP embedding…"),
-            (1.00,  "Finalising results…"),
-        ]
+        tmp_path = Path(f"/tmp/{uploaded_file.name}")
+        tissue_key = model_info["key"]
 
-        adata = st.session_state.adata
-        predictions = None
-        umap_coords = None
+        _step_counter = {"n": 0}
+        _TOTAL_STEPS = 6
 
-        for prog, msg in steps:
+        def _progress_cb(msg: str) -> None:
+            _step_counter["n"] = min(_step_counter["n"] + 1, _TOTAL_STEPS)
+            progress_bar.progress(_step_counter["n"] / _TOTAL_STEPS)
             status_text.markdown(f"⏳ &nbsp;`{msg}`")
-            progress_bar.progress(prog)
 
-            # ── Actual pipeline steps ──────────────────────────────────────
-            if SCANPY_OK and adata is not None:
-                import scipy.sparse as sp
-
-                if prog == 0.08:
-                    # Ensure raw count matrix
-                    if not sp.issparse(adata.X):
-                        import scipy.sparse as sp2
-                        adata.X = sp2.csr_matrix(adata.X)
-
-                elif prog == 0.20 and adata.n_obs > 0:
-                    try:
-                        sc.pp.filter_cells(adata, min_genes=5)
-                        sc.pp.filter_genes(adata, min_cells=3)
-                    except Exception:
-                        pass
-
-                elif prog == 0.35:
-                    try:
-                        sc.pp.normalize_total(adata, target_sum=1e4)
-                        sc.pp.log1p(adata)
-                    except Exception:
-                        pass
-
-                elif prog == 0.50:
-                    try:
-                        n_hvg = min(2000, adata.n_vars)
-                        sc.pp.highly_variable_genes(
-                            adata, n_top_genes=n_hvg, flavor="seurat"
-                        )
-                    except Exception:
-                        pass
-
-                elif prog == 0.65:
-                    try:
-                        n_pcs = min(50, adata.n_obs - 1, adata.n_vars - 1)
-                        sc.tl.pca(adata, n_comps=n_pcs, use_highly_variable=True)
-                    except Exception:
-                        try:
-                            sc.tl.pca(adata, n_comps=min(20, adata.n_obs - 1))
-                        except Exception:
-                            pass
-
-                elif prog == 0.80:
-                    # ── Load pre-trained model OR fall back to a demo classifier
-                    model_path = Path(model_info["model_file"])
-                    cell_types = model_info["cell_types"]
-
-                    if model_path.exists() and JOBLIB_OK:
-                        try:
-                            clf = joblib.load(model_path)
-                            X_rep = adata.obsm.get("X_pca")
-                            if X_rep is not None:
-                                preds = clf.predict(X_rep)
-                            else:
-                                preds = np.random.choice(cell_types, size=adata.n_obs)
-                        except Exception:
-                            preds = np.random.choice(cell_types, size=adata.n_obs)
-                    else:
-                        # Demo: random predictions (replace with real model)
-                        rng = np.random.default_rng(42)
-                        weights = rng.dirichlet(np.ones(len(cell_types)))
-                        preds = rng.choice(cell_types, size=adata.n_obs, p=weights)
-
-                    adata.obs["predicted_cell_type"] = preds
-                    predictions = pd.DataFrame({
-                        "cell_barcode": adata.obs_names,
-                        "predicted_cell_type": preds,
-                    })
-
-                elif prog == 0.90 and UMAP_OK:
-                    try:
-                        sc.pp.neighbors(adata, n_pcs=min(30, adata.obsm["X_pca"].shape[1]))
-                        sc.tl.umap(adata)
-                        umap_coords = adata.obsm["X_umap"]
-                    except Exception:
-                        # Fall back: simulate UMAP coords from PCA
-                        if "X_pca" in adata.obsm:
-                            pca = adata.obsm["X_pca"][:, :2]
-                            umap_coords = pca
-                        else:
-                            rng = np.random.default_rng(0)
-                            umap_coords = rng.standard_normal((adata.n_obs, 2))
-
-            else:
-                # scanpy not available – full demo mode
-                if prog == 0.80:
-                    cell_types = model_info["cell_types"]
-                    rng = np.random.default_rng(42)
-                    weights = rng.dirichlet(np.ones(len(cell_types)))
-                    preds = rng.choice(
-                        cell_types,
-                        size=st.session_state.n_cells,
-                        p=weights,
-                    )
-                    predictions = pd.DataFrame({
-                        "cell_barcode": [f"cell_{i}" for i in range(st.session_state.n_cells)],
-                        "predicted_cell_type": preds,
-                    })
-                elif prog == 0.90:
-                    rng = np.random.default_rng(0)
-                    umap_coords = rng.standard_normal((st.session_state.n_cells, 2))
-
-            time.sleep(0.35)
+        from backend import run_analysis
+        result = run_analysis(tmp_path, tissue_key, progress_callback=_progress_cb)
 
         progress_bar.progress(1.0)
-        status_text.markdown("✅ &nbsp;`Prediction complete!`")
 
-        st.session_state.predictions = predictions
-        st.session_state.umap_coords = umap_coords
-        st.session_state.run_complete = True
-        st.session_state.adata = adata
-
-        time.sleep(0.6)
         progress_bar.empty()
         status_text.empty()
-        st.rerun()
+
+        if result.success:
+            st.session_state.predictions  = result.predictions
+            st.session_state.umap_coords  = result.umap_coords
+            st.session_state.pca_coords   = result.pca_coords
+            st.session_state.adata        = result.adata
+            st.session_state.run_complete = True
+            st.session_state.n_cells      = result.n_cells
+            st.session_state.n_genes      = result.n_genes
+            st.rerun()
+        else:
+            st.error(f"**Pipeline failed:** {result.error}")
+            for step in result.steps:
+                icon = "✅" if step.success else "❌"
+                st.caption(f"{icon} {step.name}: {step.message}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -698,103 +607,157 @@ with col_right:
 
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
-        # ── UMAP Plot ─────────────────────────────────────────────────────────
-        st.markdown('<div class="card-title">UMAP / t-SNE Embedding</div>', unsafe_allow_html=True)
+        # ── Embeddings: UMAP + PCA tabs ───────────────────────────────────────
+        st.markdown('<div class="card-title">Embeddings</div>', unsafe_allow_html=True)
 
-        if umap_coords is not None and predictions is not None:
-            pred_labels = predictions["predicted_cell_type"].values
-            unique_types = list(cell_type_counts.index)
-            color_map = {ct: CELL_PALETTE[i % len(CELL_PALETTE)]
-                         for i, ct in enumerate(unique_types)}
+        tab_umap, tab_pca = st.tabs(["UMAP", "PCA"])
 
-            fig_umap, ax2 = plt.subplots(figsize=(7, 5.5))
-            fig_umap.patch.set_facecolor("#0d1117")
-            ax2.set_facecolor("#0d1117")
+        pred_labels = predictions["predicted_cell_type"].values
+        unique_types = list(cell_type_counts.index)
+        color_map = {ct: CELL_PALETTE[i % len(CELL_PALETTE)] for i, ct in enumerate(unique_types)}
+        tissue_short = tissue_choice.split("(")[0].strip()
 
+        def _scatter(ax, coords, title, xlabel, ylabel):
             for ct in unique_types:
                 mask = pred_labels == ct
-                ax2.scatter(
-                    umap_coords[mask, 0],
-                    umap_coords[mask, 1],
+                ax.scatter(
+                    coords[mask, 0], coords[mask, 1],
                     c=color_map[ct],
                     s=8 if n_cells > 2000 else 18,
-                    alpha=0.75,
-                    linewidths=0,
-                    label=ct,
-                    rasterized=True,
+                    alpha=0.75, linewidths=0, label=ct, rasterized=True,
                 )
-
-            legend = ax2.legend(
-                fontsize=8,
-                markerscale=2,
-                frameon=True,
-                framealpha=0.15,
-                edgecolor="#30363d",
-                labelcolor="#e6edf3",
-                loc="upper right",
-            )
+            legend = ax.legend(fontsize=8, markerscale=2, frameon=True,
+                               framealpha=0.15, edgecolor="#30363d", labelcolor="#e6edf3")
             legend.get_frame().set_facecolor("#161b22")
+            ax.set_xlabel(xlabel, fontsize=10, color="#8b949e")
+            ax.set_ylabel(ylabel, fontsize=10, color="#8b949e")
+            ax.tick_params(colors="#8b949e", labelsize=8)
+            ax.spines[:].set_color("#21262d")
+            ax.set_title(title, fontsize=11, color="#e6edf3", pad=10)
 
-            ax2.set_xlabel("UMAP 1", fontsize=10, color="#8b949e")
-            ax2.set_ylabel("UMAP 2", fontsize=10, color="#8b949e")
-            ax2.tick_params(colors="#8b949e", labelsize=8)
-            ax2.spines[:].set_color("#21262d")
-            ax2.set_title(
-                f"UMAP · {tissue_choice.split('(')[0].strip()}",
-                fontsize=11, color="#e6edf3", pad=10,
-            )
-            plt.tight_layout(pad=0.5)
+        with tab_umap:
+            if umap_coords is not None:
+                fig_umap, ax_u = plt.subplots(figsize=(7, 5.5))
+                fig_umap.patch.set_facecolor("#0d1117")
+                ax_u.set_facecolor("#0d1117")
+                _scatter(ax_u, umap_coords, f"UMAP · {tissue_short}", "UMAP 1", "UMAP 2")
+                plt.tight_layout(pad=0.5)
+                st.pyplot(fig_umap, use_container_width=True)
+                plt.close(fig_umap)
 
-            st.pyplot(fig_umap, use_container_width=True)
-            plt.close(fig_umap)
-
-            # Export UMAP figure
-            buf = io.BytesIO()
-            fig_save, ax3 = plt.subplots(figsize=(9, 7))
-            fig_save.patch.set_facecolor("#0d1117")
-            ax3.set_facecolor("#0d1117")
-            for ct in unique_types:
-                mask = pred_labels == ct
-                ax3.scatter(
-                    umap_coords[mask, 0], umap_coords[mask, 1],
-                    c=color_map[ct], s=12, alpha=0.8, linewidths=0, label=ct,
+                buf = io.BytesIO()
+                fig_umap.savefig(buf, format="png", dpi=150, facecolor="#0d1117")
+                buf.seek(0)
+                st.download_button(
+                    label="⬇  Export UMAP Plot (PNG)",
+                    data=buf, file_name="umap_plot.png", mime="image/png",
                 )
-            legend2 = ax3.legend(fontsize=9, markerscale=2, frameon=True,
-                                  framealpha=0.15, edgecolor="#30363d",
-                                  labelcolor="#e6edf3")
-            legend2.get_frame().set_facecolor("#161b22")
-            ax3.set_xlabel("UMAP 1", fontsize=11, color="#8b949e")
-            ax3.set_ylabel("UMAP 2", fontsize=11, color="#8b949e")
-            ax3.tick_params(colors="#8b949e")
-            ax3.spines[:].set_color("#21262d")
-            ax3.set_title(f"UMAP · {tissue_choice}", fontsize=12, color="#e6edf3", pad=12)
-            plt.tight_layout()
-            fig_save.savefig(buf, format="png", dpi=150, facecolor="#0d1117")
-            plt.close(fig_save)
-            buf.seek(0)
+            else:
+                st.info("UMAP could not be computed. Install `umap-learn` and `scanpy`.")
 
-            st.download_button(
-                label="⬇  Export UMAP Plot (PNG)",
-                data=buf,
-                file_name="umap_plot.png",
-                mime="image/png",
-            )
-        else:
-            st.info("UMAP could not be computed. Install `umap-learn` and `scanpy` for embedding visualisation.")
+        with tab_pca:
+            pca_coords = st.session_state.get("pca_coords")
+            if pca_coords is not None:
+                fig_pca, ax_p = plt.subplots(figsize=(7, 5.5))
+                fig_pca.patch.set_facecolor("#0d1117")
+                ax_p.set_facecolor("#0d1117")
+                _scatter(ax_p, pca_coords, f"PCA · {tissue_short}", "PC 1", "PC 2")
+                plt.tight_layout(pad=0.5)
+                st.pyplot(fig_pca, use_container_width=True)
+                plt.close(fig_pca)
+
+                buf_pca = io.BytesIO()
+                fig_pca.savefig(buf_pca, format="png", dpi=150, facecolor="#0d1117")
+                buf_pca.seek(0)
+                st.download_button(
+                    label="⬇  Export PCA Plot (PNG)",
+                    data=buf_pca, file_name="pca_plot.png", mime="image/png",
+                )
+            else:
+                st.info("PCA coordinates not available.")
 
         # ── Reset ─────────────────────────────────────────────────────────────
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
         if st.button("↺  Upload New Dataset"):
-            for key in ["validated", "adata", "validation_result",
-                        "predictions", "umap_coords", "run_complete",
-                        "n_cells", "n_genes"]:
-                st.session_state[key] = (
-                    False if isinstance(st.session_state[key], bool)
-                    else None if st.session_state[key] is not None
-                    else 0 if isinstance(st.session_state[key], int)
-                    else st.session_state[key]
-                )
+            for key in ["validated", "adata", "validation_result", "predictions",
+                        "umap_coords", "pca_coords", "run_complete", "n_cells",
+                        "n_genes", "dge_result", "dge_groups_done",
+                        "last_uploaded_filename"]:
+                st.session_state.pop(key, None)
             st.rerun()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 04 · Differential Gene Expression  (full-width, below main columns)
+# ─────────────────────────────────────────────────────────────────────────────
+
+if st.session_state.run_complete and st.session_state.predictions is not None:
+
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div class="card-title">04 · Differential Gene Expression</div>', unsafe_allow_html=True)
+    st.caption("Compare two predicted cell types to find differentially expressed genes.")
+
+    available_types = sorted(
+        st.session_state.predictions["predicted_cell_type"].unique().tolist()
+    )
+
+    dge_sel1, dge_sel2, dge_btn_col = st.columns([2, 2, 1])
+
+    with dge_sel1:
+        dge_group1 = st.selectbox("Group 1", options=available_types, key="dge_sel_group1")
+
+    with dge_sel2:
+        group2_opts = [ct for ct in available_types if ct != dge_group1]
+        dge_group2 = st.selectbox(
+            "Group 2",
+            options=group2_opts if group2_opts else available_types,
+            key="dge_sel_group2",
+        )
+
+    with dge_btn_col:
+        st.markdown("<br>", unsafe_allow_html=True)
+        run_dge_clicked = st.button("▶  Run DGE", use_container_width=True)
+
+    if run_dge_clicked:
+        with st.spinner(f"Comparing {dge_group1} vs {dge_group2}…"):
+            from backend import run_dge
+            dge_res = run_dge(st.session_state.adata, dge_group1, dge_group2)
+            st.session_state.dge_result = dge_res
+            st.session_state.dge_groups_done = (dge_group1, dge_group2)
+
+    dge_res = st.session_state.get("dge_result")
+    if dge_res is not None:
+        g1, g2 = st.session_state.get("dge_groups_done", ("", ""))
+
+        if dge_res.success:
+            dge_plot_col, dge_table_col = st.columns([1, 1.2], gap="large")
+
+            with dge_plot_col:
+                st.markdown(
+                    f'<div class="card-title">Volcano Plot · {g1} vs {g2}</div>',
+                    unsafe_allow_html=True,
+                )
+                if dge_res.volcano_png:
+                    st.image(dge_res.volcano_png, use_container_width=True)
+
+            with dge_table_col:
+                st.markdown(
+                    '<div class="card-title">Top Differentially Expressed Genes</div>',
+                    unsafe_allow_html=True,
+                )
+                st.dataframe(
+                    dge_res.table.head(20).reset_index(drop=True),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.download_button(
+                    label="⬇  Download DGE Results (CSV)",
+                    data=dge_res.table.to_csv(index=False).encode("utf-8"),
+                    file_name=f"dge_{g1}_vs_{g2}.csv".replace(" ", "_"),
+                    mime="text/csv",
+                )
+        else:
+            st.error(f"DGE analysis failed: {dge_res.error}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
