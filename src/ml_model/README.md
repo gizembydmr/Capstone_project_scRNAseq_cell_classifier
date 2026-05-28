@@ -16,6 +16,8 @@ This folder contains the machine learning model comparison and final model train
 4. `04_compare_all_models.py`  
    Combines the saved model comparison results into one summary table and figure set.
 
+<img width="4470" height="1228" alt="all_models_level1_summary_table" src="https://github.com/user-attachments/assets/150a7c54-da50-4683-b8e7-ff7416e44353" />
+
 5. `05_train_final_LR_model.py`  
    Trains the selected final model, Logistic Regression without class weighting, on the full development set and evaluates it on the untouched test set.
 
