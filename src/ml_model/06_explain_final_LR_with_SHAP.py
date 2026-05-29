@@ -114,6 +114,33 @@ def normalize_shap_output(shap_values):
     raise ValueError(f"Unexpected SHAP output shape: {shap_values.shape}")
 
 
+def normalize_gene_symbols(gene_symbols, training_gene_order):
+    """
+    Convert gene_symbols from the model package into a list aligned with
+    training_gene_order.
+
+    Supports:
+    - None
+    - dict mapping Ensembl ID -> gene symbol
+    - list / tuple / pandas Series / numpy array
+    """
+    if gene_symbols is None:
+        return [None] * len(training_gene_order)
+
+    if isinstance(gene_symbols, dict):
+        return [gene_symbols.get(gene_id) for gene_id in training_gene_order]
+
+    gene_symbols = list(gene_symbols)
+
+    if len(gene_symbols) != len(training_gene_order):
+        raise ValueError(
+            f"gene_symbols length mismatch: got {len(gene_symbols)}, "
+            f"expected {len(training_gene_order)}."
+        )
+
+    return gene_symbols
+
+
 def safe_filename(name: str) -> str:
     """
     Make class names safe to use in filenames.
@@ -150,7 +177,10 @@ model = model_package["model"]
 label_encoder = model_package["label_encoder"]
 class_names = list(model_package["class_names"])
 training_gene_order = list(model_package["training_gene_order"])
-gene_symbols = model_package.get("gene_symbols")
+gene_symbols = normalize_gene_symbols(
+    model_package.get("gene_symbols"),
+    training_gene_order,
+)
 
 preprocessing = model_package["preprocessing"]
 target_sum = preprocessing["target_sum"]
@@ -310,9 +340,7 @@ global_df = pd.DataFrame(
     {
         "feature_order": np.arange(len(training_gene_order)),
         "ensembl_id": training_gene_order,
-        "gene_symbol": gene_symbols
-        if gene_symbols is not None
-        else [None] * len(training_gene_order),
+        "gene_symbol": gene_symbols,
         "mean_abs_shap": global_importance,
     }
 )
@@ -341,9 +369,7 @@ for class_idx, class_name in enumerate(class_names):
             "class_name": class_name,
             "feature_order": np.arange(len(training_gene_order)),
             "ensembl_id": training_gene_order,
-            "gene_symbol": gene_symbols
-            if gene_symbols is not None
-            else [None] * len(training_gene_order),
+            "gene_symbol": gene_symbols,
             "mean_abs_shap": class_importance,
         }
     )
