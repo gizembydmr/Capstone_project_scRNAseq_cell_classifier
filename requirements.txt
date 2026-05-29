@@ -1,1 +1,9 @@
-
+anndata
+joblib
+matplotlib
+numpy
+pandas
+scanpy
+scikit-learn
+scipy
+shap
