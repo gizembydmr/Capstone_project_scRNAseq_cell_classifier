@@ -31,6 +31,12 @@ def preprocess_for_inference(
     Important difference from training:
     - NO HVG selection is performed here
     - gene selection is enforced later via gene_alignment.py
+
+    Important:
+    - In the final GUI/inference workflow, target_sum should be loaded
+      from the trained model package.
+    - If target_sum=None, a dataset-specific median is computed only as
+      a standalone testing fallback.
     """
 
     if copy:
@@ -74,13 +80,13 @@ def preprocess_for_inference(
     else:
         total_counts = np.asarray(adata.X.sum(axis=1)).ravel()
 
-# Final GUI/inference workflow should pass target_sum from the trained model package.
-# This fallback is only for standalone testing.
-used_target_sum_fallback = False
+    # Final GUI/inference workflow should pass target_sum from the trained model package.
+    # This fallback is only for standalone testing.
+    used_target_sum_fallback = False
 
-if target_sum is None:
-    target_sum = float(np.median(total_counts))
-    used_target_sum_fallback = True
+    if target_sum is None:
+        target_sum = float(np.median(total_counts))
+        used_target_sum_fallback = True
 
     if target_sum <= 0:
         raise ValueError("Computed target_sum is <= 0. Cannot normalize.")
@@ -93,22 +99,26 @@ if target_sum is None:
     adata.raw = adata
 
     adata.uns["preprocessing_inference"] = {
-    "gene_id_used_for_alignment": "Ensembl ID in adata.var_names",
-    "min_counts": int(min_counts),
-    "min_genes": int(min_genes),
-    "target_sum": float(target_sum),
-    "target_sum_source": (
-        "computed from uploaded/query dataset; standalone fallback only"
-        if used_target_sum_fallback
-        else "loaded from trained model package"
-    ),
-    "used_target_sum_fallback": bool(used_target_sum_fallback),
-    "normalization": "library size normalization using target_sum",
-    "log_transform": "log1p",
-    "note": "No HVG selection is performed during inference preprocessing.",
-}
+        "gene_id_used_for_alignment": "Ensembl ID in adata.var_names",
+        "min_counts": int(min_counts),
+        "min_genes": int(min_genes),
+        "target_sum": float(target_sum),
+        "target_sum_source": (
+            "computed from uploaded/query dataset; standalone fallback only"
+            if used_target_sum_fallback
+            else "loaded from trained model package"
+        ),
+        "used_target_sum_fallback": bool(used_target_sum_fallback),
+        "normalization": "library size normalization using target_sum",
+        "log_transform": "log1p",
+        "note": "No HVG selection is performed during inference preprocessing. "
+                "Gene alignment to the training HVG order should be performed "
+                "later using gene_alignment.py.",
+    }
+
     return adata
-    
+
+
 if __name__ == "__main__":
     import joblib
 
