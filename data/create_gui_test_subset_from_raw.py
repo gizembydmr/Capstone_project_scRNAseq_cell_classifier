@@ -4,20 +4,27 @@
 Create a semi-balanced raw-count GUI/backend test subset from PBMC68k.
 
 Purpose:
-This script creates a small .h5ad file that behaves like a user-uploaded dataset.
-It uses pbmc68k_annotated_with_levels.h5ad, where adata.X contains the raw UMI count matrix.
+This script creates two .h5ad files:
 
-This file is for MVP GUI/backend integration testing only.
-It should NOT be used as the final model performance evaluation dataset.
+1. pbmc68k_gui_test_2401cells.h5ad
+   - unlabeled GUI test input
+   - simulates a real user-uploaded dataset
+   - cell type labels are removed from adata.obs
 
-Output:
-model_development/GUI_test_subset/pbmc68k_gui_test_3000cells.h5ad
+2. pbmc68k_gui_test_2401cells_labelled_for_control.h5ad
+   - labelled control version
+   - keeps true labels for debugging/checking only
+
+Both files are created from pbmc68k_annotated_with_levels.h5ad,
+where adata.X contains raw UMI counts.
+
+These files are for MVP GUI/backend integration testing only.
+They should NOT replace the full held-out test set for final model evaluation.
 """
 
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 import scanpy as sc
 from scipy import sparse
 
@@ -47,7 +54,14 @@ SPLIT_PATH = (
 OUTPUT_DIR = PROJECT_DIR / "GUI_test_subset"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-OUTPUT_PATH = OUTPUT_DIR / "pbmc68k_gui_test_2401cells.h5ad"
+# Main GUI input file: labels removed
+OUTPUT_UNLABELED_PATH = OUTPUT_DIR / "pbmc68k_gui_test_2401cells.h5ad"
+
+# Control/debug file: labels kept
+OUTPUT_LABELLED_CONTROL_PATH = (
+    OUTPUT_DIR / "pbmc68k_gui_test_2401cells_labelled_for_control.h5ad"
+)
+
 SUMMARY_PATH = OUTPUT_DIR / "pbmc68k_gui_test_2401cells_summary.csv"
 
 
@@ -61,6 +75,17 @@ SAMPLING_TARGETS = {
     "Progenitor": 46,
     "T cell": 500,
 }
+
+# These columns should NOT be present in the actual GUI input file.
+# They are kept only in the labelled control file.
+LABEL_COLUMNS_TO_REMOVE = [
+    "cell_type",
+    "cell_type_original",
+    "cell_type_standardized",
+    "cell_type_level_1",
+    "cell_type_level_2",
+    "cell_type_level_3",
+]
 
 
 # ============================================================
@@ -155,26 +180,26 @@ for class_name, target_n in SAMPLING_TARGETS.items():
 selected_obs_names = np.array(selected_obs_names)
 rng.shuffle(selected_obs_names)
 
-adata_subset = adata_test[selected_obs_names].copy()
+adata_subset_labelled = adata_test[selected_obs_names].copy()
 
 
 # ============================================================
-# 5. Add metadata
+# 5. Add metadata to labelled control file
 # ============================================================
 
-adata_subset.uns["gui_test_subset_info"] = {
-    "purpose": "Semi-balanced raw-count held-out test subset for GUI/backend MVP testing",
+adata_subset_labelled.uns["gui_test_subset_info"] = {
+    "purpose": (
+        "Semi-balanced raw-count held-out test subset for GUI/backend MVP testing"
+    ),
     "source_dataset": str(DATA_PATH),
     "split_source": str(SPLIT_PATH),
     "label_column_used_for_sampling": LABEL_COLUMN,
     "sampling_targets": SAMPLING_TARGETS,
     "random_state": RANDOM_STATE,
     "important_note": (
-        "This subset is intended for software integration testing only. "
-        "It is created from the raw annotated dataset so that the full inference "
-        "workflow can be tested: data loading, validation, inference preprocessing, "
-        "gene alignment, model prediction, and GUI output. It should not replace "
-        "the full held-out test set for final model performance evaluation."
+        "The labelled control file keeps true labels only for debugging/checking. "
+        "The main GUI input file removes these labels to simulate a real "
+        "user-uploaded dataset."
     ),
     "matrix_note": (
         "adata.X contains raw UMI counts from pbmc68k_annotated_with_levels.h5ad. "
@@ -184,11 +209,11 @@ adata_subset.uns["gui_test_subset_info"] = {
 
 
 # ============================================================
-# 6. Create summary table
+# 6. Create summary table before removing labels
 # ============================================================
 
 summary = (
-    adata_subset.obs[LABEL_COLUMN]
+    adata_subset_labelled.obs[LABEL_COLUMN]
     .value_counts()
     .rename_axis("class_name")
     .reset_index(name="count")
@@ -196,30 +221,73 @@ summary = (
 
 summary["percentage"] = summary["count"] / summary["count"].sum() * 100
 
-print("\nFinal GUI test subset:")
-print(adata_subset)
+print("\nFinal labelled control subset:")
+print(adata_subset_labelled)
 
 print("\nFinal Level 1 distribution:")
 print(summary)
 
-if "cell_type_level_2" in adata_subset.obs.columns:
+if "cell_type_level_2" in adata_subset_labelled.obs.columns:
     print("\nFinal Level 2 distribution:")
-    print(adata_subset.obs["cell_type_level_2"].value_counts())
+    print(adata_subset_labelled.obs["cell_type_level_2"].value_counts())
 
-if "cell_type_original" in adata_subset.obs.columns:
+if "cell_type_original" in adata_subset_labelled.obs.columns:
     print("\nFinal original label distribution:")
-    print(adata_subset.obs["cell_type_original"].value_counts())
+    print(adata_subset_labelled.obs["cell_type_original"].value_counts())
 
 
 # ============================================================
-# 7. Save output
+# 7. Create unlabeled GUI input file
 # ============================================================
 
-adata_subset.write_h5ad(OUTPUT_PATH)
+adata_subset_unlabeled = adata_subset_labelled.copy()
+
+existing_label_columns = [
+    col for col in LABEL_COLUMNS_TO_REMOVE
+    if col in adata_subset_unlabeled.obs.columns
+]
+
+adata_subset_unlabeled.obs = adata_subset_unlabeled.obs.drop(
+    columns=existing_label_columns
+)
+
+adata_subset_unlabeled.uns["gui_test_subset_info"][
+    "label_removal_note"
+] = (
+    "Ground-truth cell type labels were removed from adata.obs in this "
+    "main GUI input file to simulate a real user-uploaded dataset. "
+    "A separate labelled control file is saved for debugging/checking."
+)
+
+adata_subset_unlabeled.uns["gui_test_subset_info"][
+    "removed_label_columns"
+] = existing_label_columns
+
+
+# ============================================================
+# 8. Save outputs
+# ============================================================
+
+# Save actual GUI input: unlabeled
+adata_subset_unlabeled.write_h5ad(OUTPUT_UNLABELED_PATH)
+
+# Save labelled control/debug version
+adata_subset_labelled.write_h5ad(OUTPUT_LABELLED_CONTROL_PATH)
+
+# Save summary table
 summary.to_csv(SUMMARY_PATH, index=False)
 
-print("\nSaved GUI test subset to:")
-print(OUTPUT_PATH)
+print("\nSaved unlabeled GUI test subset to:")
+print(OUTPUT_UNLABELED_PATH)
+
+print("\nSaved labelled control file to:")
+print(OUTPUT_LABELLED_CONTROL_PATH)
 
 print("\nSaved summary table to:")
 print(SUMMARY_PATH)
+
+print("\nRemaining obs columns in unlabeled GUI input:")
+print(list(adata_subset_unlabeled.obs.columns))
+
+print("\nObs columns in labelled control file:")
+print(list(adata_subset_labelled.obs.columns))
