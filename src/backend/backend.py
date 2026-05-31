@@ -84,10 +84,11 @@ class AnalysisResult:
     error: str = ""
     steps: List[StepStatus] = field(default_factory=list)
 
-    predictions: Optional[pd.DataFrame] = None   # cell_barcode | predicted_cell_type
-    umap_coords: Optional[np.ndarray] = None      # (n_cells, 2)
-    pca_coords: Optional[np.ndarray] = None       # (n_cells, n_pcs)
-    adata: Optional[object] = None                # preprocessed AnnData
+    predictions: Optional[pd.DataFrame] = None      # cell_barcode | predicted_cell_type
+    probabilities: Optional[pd.DataFrame] = None    # per-class probability scores
+    umap_coords: Optional[np.ndarray] = None        # (n_cells, 2)
+    pca_coords: Optional[np.ndarray] = None         # (n_cells, n_pcs)
+    adata: Optional[object] = None                  # preprocessed AnnData
     n_cells: int = 0
     n_genes: int = 0
     tissue: str = ""
@@ -99,6 +100,7 @@ class AnalysisResult:
             error=pr.error,
             steps=pr.steps,
             predictions=pr.predictions,
+            probabilities=pr.probabilities,
             umap_coords=pr.umap_coords,
             pca_coords=pr.pca_coords,
             adata=pr.adata,
@@ -122,6 +124,8 @@ def run_analysis(
     filepath: str | Path,
     tissue: str,
     progress_callback: Optional[Callable[[str], None]] = None,
+    min_counts: int = 500,
+    min_genes: int = 200,
 ) -> AnalysisResult:
     """
     Run the full cell-type prediction pipeline.
@@ -147,6 +151,8 @@ def run_analysis(
         filepath=filepath,
         tissue=tissue,
         progress_callback=progress_callback,
+        min_counts=min_counts,
+        min_genes=min_genes,
     )
     return AnalysisResult.from_pipeline(pr)
 

@@ -118,6 +118,8 @@ def run_pipeline(
     tissue: str,
     output_dir: Optional[str | Path] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
+    min_counts: int = 500,
+    min_genes: int = 200,
 ) -> PipelineResult:
     """
     Execute the full cell-type prediction pipeline.
@@ -143,6 +145,17 @@ def run_pipeline(
     def _log(msg: str) -> None:
         if progress_callback:
             progress_callback(msg)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Load model bundle (used in Steps 3, 4, 5)
+    # ══════════════════════════════════════════════════════════════════════════
+    try:
+        import joblib
+        bundle_path = Path(__file__).parent / "LR_level1_no_weight_final_model_bundle.joblib"
+        bundle = joblib.load(bundle_path)
+    except Exception as exc:
+        result.error = f"Could not load model bundle: {exc}"
+        return result
 
     # ══════════════════════════════════════════════════════════════════════════
     # STEP 1 — Load data
@@ -196,9 +209,16 @@ def run_pipeline(
     # ══════════════════════════════════════════════════════════════════════════
     _log("Preprocessing...")
     try:
+        preprocessing_params = bundle["preprocessing"]
+
         preprocess = _import("preprocess_inference")
         if preprocess is not None and hasattr(preprocess, "preprocess_for_inference"):
-            adata = preprocess.preprocess_for_inference(adata)
+            adata = preprocess.preprocess_for_inference(
+                adata,
+                target_sum=preprocessing_params["target_sum"],
+                min_counts=min_counts,
+                min_genes=min_genes,
+            )
             result.steps.append(StepStatus("Preprocess", True, "Normalisation + HVG selection done"))
         else:
             adata = _fallback_preprocess(adata)
@@ -229,27 +249,12 @@ def run_pipeline(
     try:
         gene_align = _import("gene_alignment")
         if gene_align is not None and hasattr(gene_align, "align_genes_to_training"):
-            here = Path(__file__).parent
-            # Look for the HVG reference CSV (team should provide this file)
-            hvg_candidates = [
-                here / "pbmc68k_hvg_list.csv",
-                here / f"{tissue}_hvg_list.csv",
-                here / "hvg_list.csv",
-            ]
-            hvg_csv = next((p for p in hvg_candidates if p.exists()), None)
-
-            if hvg_csv is not None:
-                training_gene_order = gene_align.load_training_gene_order(str(hvg_csv))
-                adata = gene_align.align_genes_to_training(adata, training_gene_order)
-                result.steps.append(StepStatus(
-                    "Gene Alignment", True,
-                    f"Aligned to {tissue} reference ({len(training_gene_order)} genes)",
-                ))
-            else:
-                result.steps.append(StepStatus(
-                    "Gene Alignment", True,
-                    "HVG reference CSV not found — genes used as-is (ask team for pbmc68k_hvg_list.csv)",
-                ))
+            training_gene_order = bundle["training_gene_order"]
+            adata = gene_align.align_genes_to_training(adata, training_gene_order)
+            result.steps.append(StepStatus(
+                "Gene Alignment", True,
+                f"Aligned to model reference ({len(training_gene_order)} genes)",
+            ))
         else:
             result.steps.append(StepStatus(
                 "Gene Alignment", True,
@@ -265,15 +270,25 @@ def run_pipeline(
     # ══════════════════════════════════════════════════════════════════════════
     _log("Running cell-type prediction...")
     try:
-        model_mod = _import("model")
-        if model_mod is not None and hasattr(model_mod, "predict"):
-            pred_result = model_mod.predict(adata, tissue=tissue)
-            predicted_labels = pred_result["labels"]
-            result.probabilities = pred_result.get("probabilities")
-            step_msg = f"{len(pd.Series(predicted_labels).unique())} cell types predicted"
-        else:
-            predicted_labels = _fallback_predict(adata, tissue)
-            step_msg = "model.py not available — demo predictions used"
+        import scipy.sparse as sp
+
+        model = bundle["model"]
+        label_encoder = bundle["label_encoder"]
+        class_names = bundle["class_names"]
+
+        model.__dict__.setdefault("multi_class", "auto")
+
+        X = adata.X
+        if sp.issparse(X):
+            X = X.toarray()
+
+        predicted_encoded = model.predict(X)
+        predicted_labels = label_encoder.inverse_transform(predicted_encoded)
+
+        proba = model.predict_proba(X)
+        result.probabilities = pd.DataFrame(proba, columns=class_names)
+
+        step_msg = f"{len(pd.Series(predicted_labels).unique())} cell types predicted"
 
         result.predictions = pd.DataFrame({
             "cell_barcode": adata.obs_names.tolist(),

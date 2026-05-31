@@ -39,17 +39,18 @@ def run_pairwise_dge(adata, groupby, group1, group2):
 
     df = pd.DataFrame({
         "gene": result["names"][group1],
-        "logfoldchange": result["logfoldchanges"][group1],
+        "logfoldchange": result["logfoldchanges"][group1].round(4),
         "pval_adj": result["pvals_adj"][group1],
-        "score": result["scores"][group1],
+        "score": result["scores"][group1].round(4),
     })
 
-    # Clean
+    # Clean (numeric işlemler string dönüşümünden önce)
     df = df.dropna()
     df = df[df["pval_adj"] > 0]
 
     # Sort by significance
     df = df.sort_values(by="pval_adj")
+
 
     return df
 
