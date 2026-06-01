@@ -1,3 +1,3 @@
 # TISSUE-SPECIFIC CELL TYPE PREDICTION PLATFORM FROM SINGLE-CELL RNA SEQUENCING DATA USING MACHINE LEARNING TECHNIQUES
 
-BAU Computer Engineering Capstone Project
+BAU Computer Engineering & Software Engineering Capstone Project
