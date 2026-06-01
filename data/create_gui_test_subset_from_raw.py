@@ -29,21 +29,18 @@ import scanpy as sc
 from scipy import sparse
 
 
-# ============================================================
-# 1. Paths and settings
-# ============================================================
-
+# Paths and settings
 RANDOM_STATE = 42
 LABEL_COLUMN = "cell_type_level_1"
 
-# Raw/annotated dataset, not preprocessed.
+# Input raw annotated dataset.
 DATA_PATH = Path(
     r"C:\Users\ferid\Downloads\capstone_demo\pbmc68k_annotated_with_levels.h5ad"
 )
 
 PROJECT_DIR = Path(r"C:\Users\ferid\Downloads\capstone_demo\model_development")
 
-# Saved split indices from the ML experiments
+# Saved split indices from previous ML experiments.
 SPLIT_PATH = (
     PROJECT_DIR
     / "results"
@@ -54,10 +51,10 @@ SPLIT_PATH = (
 OUTPUT_DIR = PROJECT_DIR / "GUI_test_subset"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# Main GUI input file: labels removed
+# Unlabeled GUI input file.
 OUTPUT_UNLABELED_PATH = OUTPUT_DIR / "pbmc68k_gui_test_2401cells.h5ad"
 
-# Control/debug file: labels kept
+# Labelled control file for debugging.
 OUTPUT_LABELLED_CONTROL_PATH = (
     OUTPUT_DIR / "pbmc68k_gui_test_2401cells_labelled_for_control.h5ad"
 )
@@ -66,7 +63,6 @@ SUMMARY_PATH = OUTPUT_DIR / "pbmc68k_gui_test_2401cells_summary.csv"
 
 
 # Semi-balanced sampling plan from the held-out test set.
-# If fewer cells are available, the script takes all available cells.
 SAMPLING_TARGETS = {
     "B cell": 500,
     "Dendritic": 355,
@@ -76,8 +72,7 @@ SAMPLING_TARGETS = {
     "T cell": 500,
 }
 
-# These columns should NOT be present in the actual GUI input file.
-# They are kept only in the labelled control file.
+# Label columns removed from the actual GUI input file.
 LABEL_COLUMNS_TO_REMOVE = [
     "cell_type",
     "cell_type_original",
@@ -88,10 +83,7 @@ LABEL_COLUMNS_TO_REMOVE = [
 ]
 
 
-# ============================================================
-# 2. Load raw/annotated dataset
-# ============================================================
-
+# Load raw/annotated dataset
 print("Loading raw annotated dataset...")
 adata = sc.read_h5ad(DATA_PATH)
 
@@ -107,17 +99,6 @@ if not SPLIT_PATH.exists():
         "Please make sure LR_level1_split_indices.npz exists."
     )
 
-# Make sure X is raw count-like, not already HVG-filtered.
-print("\nMatrix shape:")
-print(adata.shape)
-
-if adata.n_vars < 10000:
-    print(
-        "\nWARNING: This dataset has fewer than 10,000 genes. "
-        "Please check that you are using the raw annotated dataset, "
-        "not the preprocessed HVG-filtered training dataset."
-    )
-
 if sparse.issparse(adata.X):
     print("adata.X is sparse.")
 else:
@@ -127,10 +108,7 @@ print("\nLevel 1 distribution in full raw dataset:")
 print(adata.obs[LABEL_COLUMN].value_counts())
 
 
-# ============================================================
-# 3. Load held-out test indices
-# ============================================================
-
+# Load held-out test indices
 split_data = np.load(SPLIT_PATH)
 test_indices = split_data["test_indices"]
 
@@ -143,10 +121,7 @@ print("\nLevel 1 distribution in held-out test set:")
 print(adata_test.obs[LABEL_COLUMN].value_counts())
 
 
-# ============================================================
-# 4. Semi-balanced sampling
-# ============================================================
-
+# Semi-balanced sampling
 rng = np.random.default_rng(RANDOM_STATE)
 
 selected_obs_names = []
@@ -176,17 +151,14 @@ for class_name, target_n in SAMPLING_TARGETS.items():
     print(f"{class_name}: selected {n_to_sample} / {n_available}")
 
 
-# Shuffle cells so they are not grouped by class in the output file
+# Shuffle cells so output rows are not grouped by class.
 selected_obs_names = np.array(selected_obs_names)
 rng.shuffle(selected_obs_names)
 
 adata_subset_labelled = adata_test[selected_obs_names].copy()
 
 
-# ============================================================
-# 5. Add metadata to labelled control file
-# ============================================================
-
+# Add metadata to labelled control file
 adata_subset_labelled.uns["gui_test_subset_info"] = {
     "purpose": (
         "Semi-balanced raw-count held-out test subset for GUI/backend MVP testing"
@@ -208,10 +180,7 @@ adata_subset_labelled.uns["gui_test_subset_info"] = {
 }
 
 
-# ============================================================
-# 6. Create summary table before removing labels
-# ============================================================
-
+# Create summary table before removing labels
 summary = (
     adata_subset_labelled.obs[LABEL_COLUMN]
     .value_counts()
@@ -236,10 +205,7 @@ if "cell_type_original" in adata_subset_labelled.obs.columns:
     print(adata_subset_labelled.obs["cell_type_original"].value_counts())
 
 
-# ============================================================
-# 7. Create unlabeled GUI input file
-# ============================================================
-
+# Create unlabeled GUI input file
 adata_subset_unlabeled = adata_subset_labelled.copy()
 
 existing_label_columns = [
@@ -264,17 +230,15 @@ adata_subset_unlabeled.uns["gui_test_subset_info"][
 ] = existing_label_columns
 
 
-# ============================================================
-# 8. Save outputs
-# ============================================================
+# Save outputs
 
-# Save actual GUI input: unlabeled
+# Save unlabeled GUI input.
 adata_subset_unlabeled.write_h5ad(OUTPUT_UNLABELED_PATH)
 
-# Save labelled control/debug version
+# Save labelled control file.
 adata_subset_labelled.write_h5ad(OUTPUT_LABELLED_CONTROL_PATH)
 
-# Save summary table
+# Save summary table.
 summary.to_csv(SUMMARY_PATH, index=False)
 
 print("\nSaved unlabeled GUI test subset to:")
@@ -289,5 +253,7 @@ print(SUMMARY_PATH)
 print("\nRemaining obs columns in unlabeled GUI input:")
 print(list(adata_subset_unlabeled.obs.columns))
 
+print("\nObs columns in labelled control file:")
+print(list(adata_subset_labelled.obs.columns))
 print("\nObs columns in labelled control file:")
 print(list(adata_subset_labelled.obs.columns))
