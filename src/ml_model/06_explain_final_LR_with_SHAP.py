@@ -55,7 +55,13 @@ RANDOM_STATE = 42
 # You can increase EXPLAIN_SIZE later if needed.
 BACKGROUND_SIZE = 100
 EXPLAIN_SIZE = 500
+
+# Global/class-level plots
 TOP_N_GENES = 20
+
+# GUI/report-oriented outputs
+TOP_N_GROUP_PLOT_GENES = 10
+TOP_N_CELL_GENES = 10
 
 
 # ======================================================================
@@ -139,6 +145,13 @@ def normalize_gene_symbols(gene_symbols, training_gene_order):
         )
 
     return gene_symbols
+
+
+def get_class_index_map(class_names):
+    """
+    Build a mapping from class name to class index in the SHAP output.
+    """
+    return {class_name: idx for idx, class_name in enumerate(class_names)}
 
 
 def safe_filename(name: str) -> str:
@@ -310,6 +323,8 @@ shap_values = normalize_shap_output(raw_shap_values)
 print(f"SHAP values shape: {shap_values.shape}")
 print("SHAP shape meaning: cells x genes x classes")
 
+class_to_index = get_class_index_map(class_names)
+
 
 # ======================================================================
 # 8. Save SHAP values for explained cells metadata
@@ -389,7 +404,100 @@ print(f"Saved class-specific SHAP importance to: {class_specific_csv_path}")
 
 
 # ======================================================================
-# 11. Plot global top SHAP genes
+# 11. Predicted-group SHAP gene importance
+# ======================================================================
+
+print("Computing predicted-group SHAP gene importance...")
+
+predicted_group_tables = []
+
+for predicted_group in sorted(pd.unique(explained_predictions)):
+    if predicted_group not in class_to_index:
+        raise ValueError(
+            f"Predicted group '{predicted_group}' was not found in class_names."
+        )
+
+    group_mask = explained_predictions == predicted_group
+    n_cells_group = int(np.sum(group_mask))
+    class_idx = class_to_index[predicted_group]
+
+    # For cells predicted as this group, summarize SHAP values for that same class.
+    group_shap = shap_values[group_mask, :, class_idx]
+
+    mean_abs_shap = np.mean(np.abs(group_shap), axis=0)
+    mean_shap = np.mean(group_shap, axis=0)
+
+    group_df = pd.DataFrame(
+        {
+            "predicted_group": predicted_group,
+            "ensembl_id": training_gene_order,
+            "gene_symbol": gene_symbols,
+            "mean_abs_shap": mean_abs_shap,
+            "mean_shap": mean_shap,
+            "n_cells": n_cells_group,
+        }
+    )
+
+    group_df = group_df.sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+    group_df.insert(1, "rank", np.arange(1, len(group_df) + 1))
+
+    predicted_group_tables.append(group_df)
+
+predicted_group_df = pd.concat(predicted_group_tables, axis=0)
+
+predicted_group_csv_path = OUTPUT_DIR / "shap_gene_importance_by_predicted_group.csv"
+predicted_group_df.to_csv(predicted_group_csv_path, index=False)
+
+print(f"Saved predicted-group SHAP importance to: {predicted_group_csv_path}")
+
+
+# ======================================================================
+# 12. Cell-level SHAP explanations
+# ======================================================================
+
+print("Computing cell-level SHAP explanations...")
+
+cell_level_rows = []
+
+for local_cell_idx, cell_id in enumerate(explained_cell_ids):
+    predicted_class = explained_predictions[local_cell_idx]
+
+    if predicted_class not in class_to_index:
+        raise ValueError(
+            f"Predicted class '{predicted_class}' was not found in class_names."
+        )
+
+    class_idx = class_to_index[predicted_class]
+
+    cell_shap = shap_values[local_cell_idx, :, class_idx]
+    abs_cell_shap = np.abs(cell_shap)
+
+    top_gene_indices = np.argsort(abs_cell_shap)[::-1][:TOP_N_CELL_GENES]
+
+    for rank, gene_idx in enumerate(top_gene_indices, start=1):
+        cell_level_rows.append(
+            {
+                "cell_id": cell_id,
+                "predicted_class": predicted_class,
+                "rank": rank,
+                "ensembl_id": training_gene_order[gene_idx],
+                "gene_symbol": gene_symbols[gene_idx],
+                "shap_value": float(cell_shap[gene_idx]),
+                "abs_shap_value": float(abs_cell_shap[gene_idx]),
+                "model_input_expression": float(X_explain[local_cell_idx, gene_idx]),
+            }
+        )
+
+cell_level_df = pd.DataFrame(cell_level_rows)
+
+cell_level_csv_path = OUTPUT_DIR / "shap_top_genes_per_cell.csv"
+cell_level_df.to_csv(cell_level_csv_path, index=False)
+
+print(f"Saved cell-level SHAP explanations to: {cell_level_csv_path}")
+
+
+# ======================================================================
+# 13. Plot global top SHAP genes
 # ======================================================================
 
 print("Saving SHAP plots...")
@@ -415,7 +523,7 @@ print(f"Saved global SHAP plot to: {global_plot_path}")
 
 
 # ======================================================================
-# 12. Plot class-specific top SHAP genes
+# 14. Plot class-specific top SHAP genes
 # ======================================================================
 
 for class_name in class_names:
@@ -437,6 +545,44 @@ for class_name in class_names:
     class_plot_path = OUTPUT_DIR / f"shap_top_genes_{safe_filename(class_name)}.png"
     plt.savefig(class_plot_path, dpi=300, bbox_inches="tight")
     plt.close()
+
+    print(f"Saved class-specific SHAP plot to: {class_plot_path}")
+
+
+# ======================================================================
+# 15. Plot top SHAP genes by predicted group
+# ======================================================================
+
+print("Saving predicted-group SHAP plots...")
+
+for predicted_group in sorted(pd.unique(explained_predictions)):
+    group_df = predicted_group_df[
+        predicted_group_df["predicted_group"] == predicted_group
+    ]
+
+    top_group = group_df.head(TOP_N_GROUP_PLOT_GENES).iloc[::-1].copy()
+
+    top_group["plot_label"] = [
+        make_gene_label(symbol, ens_id)
+        for symbol, ens_id in zip(top_group["gene_symbol"], top_group["ensembl_id"])
+    ]
+
+    plt.figure(figsize=(8, 5))
+    plt.barh(top_group["plot_label"], top_group["mean_abs_shap"])
+    plt.xlabel("Mean absolute SHAP value")
+    plt.ylabel("Gene")
+    plt.title(f"Top genes contributing to {predicted_group} predictions")
+    plt.tight_layout()
+
+    group_plot_path = (
+        OUTPUT_DIR
+        / f"shap_top_genes_by_predicted_group_{safe_filename(predicted_group)}.png"
+    )
+    plt.savefig(group_plot_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved predicted-group SHAP plot to: {group_plot_path}")
+
 
 print("SHAP analysis finished successfully.")
 print(f"All SHAP outputs were saved to: {OUTPUT_DIR}")
