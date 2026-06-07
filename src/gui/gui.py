@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import tempfile
 from data_validation import validate_file, ValidationResult
 
 # ── Optional heavy imports (graceful fallback) ───────────────────────────────
@@ -322,6 +323,7 @@ def _init_state() -> None:
         "n_genes": 0,
         "selected_tissue": list(TISSUE_MODELS.keys())[0],
         "pca_coords": None,
+        "pca_variance_ratio": None,
         "dge_result": None,
         "dge_groups_done": ("", ""),
         "min_counts_val": 500,
@@ -485,8 +487,11 @@ with tab_predict:
             new_file = uploaded_file.name != st.session_state.get("last_uploaded_filename", "")
 
             if new_file:
-                tmp_path = Path(f"/tmp/{uploaded_file.name}")
-                tmp_path.write_bytes(uploaded_file.getvalue())
+                suffix = Path(uploaded_file.name).suffix
+                with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as _f:
+                    _f.write(uploaded_file.getvalue())
+                    tmp_path = Path(_f.name)
+                st.session_state["tmp_path"] = tmp_path
 
                 with st.spinner("Validating file…"):
                     vr: ValidationResult = validate_file(tmp_path)
@@ -604,7 +609,7 @@ with tab_predict:
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            tmp_path = Path(f"/tmp/{uploaded_file.name}")
+            tmp_path = st.session_state.get("tmp_path") or Path(f"/tmp/{uploaded_file.name}")
             tissue_key = model_info["key"]
 
             _step_counter = {"n": 0}
@@ -629,14 +634,15 @@ with tab_predict:
             status_text.empty()
 
             if result.success:
-                st.session_state.predictions   = result.predictions
-                st.session_state.probabilities = result.probabilities
-                st.session_state.umap_coords   = result.umap_coords
-                st.session_state.pca_coords    = result.pca_coords
-                st.session_state.adata         = result.adata
-                st.session_state.run_complete  = True
-                st.session_state.n_cells       = result.n_cells
-                st.session_state.n_genes       = result.n_genes
+                st.session_state.predictions       = result.predictions
+                st.session_state.probabilities     = result.probabilities
+                st.session_state.umap_coords       = result.umap_coords
+                st.session_state.pca_coords        = result.pca_coords
+                st.session_state.pca_variance_ratio = result.pca_variance_ratio
+                st.session_state.adata             = result.adata
+                st.session_state.run_complete      = True
+                st.session_state.n_cells           = result.n_cells
+                st.session_state.n_genes           = result.n_genes
                 st.rerun()
             else:
                 st.error(f"**Pipeline failed:** {result.error}")
@@ -770,7 +776,7 @@ with tab_predict:
             # ── Embeddings: UMAP + PCA tabs ───────────────────────────────────
             st.markdown('<div class="card-title">Embeddings</div>', unsafe_allow_html=True)
 
-            tab_umap, tab_pca = st.tabs(["UMAP", "PCA"])
+            tab_umap, tab_pca, tab_var = st.tabs(["UMAP", "PCA", "PCA Variance"])
 
             pred_labels = predictions["predicted_cell_type"].values
             unique_types = list(cell_type_counts.index)
@@ -839,6 +845,35 @@ with tab_predict:
                     )
                 else:
                     st.info("PCA coordinates not available.")
+
+            with tab_var:
+                from backend import get_pca_variance_plot_bytes
+                variance_ratio = st.session_state.get("pca_variance_ratio")
+                if variance_ratio is not None:
+                    var_bytes = get_pca_variance_plot_bytes(variance_ratio, cumulative=False)
+                    cum_bytes = get_pca_variance_plot_bytes(variance_ratio, cumulative=True)
+
+                    st.image(var_bytes, use_container_width=True)
+                    st.download_button(
+                        label="⬇  Export Variance Plot (PNG)",
+                        data=var_bytes,
+                        file_name="pca_variance.png",
+                        mime="image/png",
+                        key="dl_pca_var",
+                    )
+
+                    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+                    st.image(cum_bytes, use_container_width=True)
+                    st.download_button(
+                        label="⬇  Export Cumulative Variance Plot (PNG)",
+                        data=cum_bytes,
+                        file_name="pca_cumulative_variance.png",
+                        mime="image/png",
+                        key="dl_pca_cum",
+                    )
+                else:
+                    st.info("PCA variance data not available. Ensure PCA was computed successfully.")
 
 
     # ── 04 · Differential Gene Expression ────────────────────────────────────
@@ -919,9 +954,9 @@ with tab_predict:
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
         if st.button("↺  Upload New Dataset"):
             for key in ["validated", "adata", "validation_result", "predictions",
-                        "probabilities", "umap_coords", "pca_coords", "run_complete",
-                        "n_cells", "n_genes", "dge_result", "dge_groups_done",
-                        "last_uploaded_filename"]:
+                        "probabilities", "umap_coords", "pca_coords", "pca_variance_ratio",
+                        "run_complete", "n_cells", "n_genes", "dge_result", "dge_groups_done",
+                        "last_uploaded_filename", "tmp_path"]:
                 st.session_state.pop(key, None)
             st.rerun()
 
