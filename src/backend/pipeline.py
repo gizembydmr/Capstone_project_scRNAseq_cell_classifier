@@ -44,9 +44,7 @@ import numpy as np
 import pandas as pd
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Module import helper
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _import(module_name: str):
     """
@@ -66,9 +64,7 @@ def _import(module_name: str):
         raise             # a dependency of the module is missing — surface the error
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Result types
-# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class StepStatus:
@@ -89,6 +85,7 @@ class PipelineResult:
     probabilities: Optional[pd.DataFrame] = None  # per-class probability scores
     umap_coords: Optional[np.ndarray] = None       # (n_cells, 2)
     pca_coords: Optional[np.ndarray] = None        # (n_cells, n_pcs)
+    pca_variance_ratio: Optional[np.ndarray] = None  # explained variance per PC
 
     adata: Optional[object] = None                 # preprocessed AnnData
     n_cells: int = 0
@@ -109,15 +106,16 @@ class PipelineResult:
         return "\n".join(lines)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Main entry point
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def run_pipeline(
     filepath: str | Path,
     tissue: str,
     output_dir: Optional[str | Path] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
+    min_counts: int = 500,
+    min_genes: int = 200,
 ) -> PipelineResult:
     """
     Execute the full cell-type prediction pipeline.
@@ -144,9 +142,16 @@ def run_pipeline(
         if progress_callback:
             progress_callback(msg)
 
-    # ══════════════════════════════════════════════════════════════════════════
+    # Load model bundle (used in Steps 3, 4, 5)
+    try:
+        import joblib
+        bundle_path = Path(__file__).parent / "LR_level1_no_weight_final_model_bundle.joblib"
+        bundle = joblib.load(bundle_path)
+    except Exception as exc:
+        result.error = f"Could not load model bundle: {exc}"
+        return result
+
     # STEP 1 — Load data
-    # ══════════════════════════════════════════════════════════════════════════
     _log("Loading dataset...")
     try:
         loader = _import("data_loader")
@@ -170,9 +175,8 @@ def run_pipeline(
         result.error = f"Data loading failed: {exc}"
         return result
 
-    # ══════════════════════════════════════════════════════════════════════════
     # STEP 2 — Validate data
-    # ══════════════════════════════════════════════════════════════════════════
+
     _log("Validating data...")
     try:
         validator = _import("data_validation")
@@ -191,14 +195,21 @@ def run_pipeline(
         result.error = f"Validation failed: {exc}"
         return result
 
-    # ══════════════════════════════════════════════════════════════════════════
+
     # STEP 3 — Preprocess
-    # ══════════════════════════════════════════════════════════════════════════
+
     _log("Preprocessing...")
     try:
+        preprocessing_params = bundle["preprocessing"]
+
         preprocess = _import("preprocess_inference")
         if preprocess is not None and hasattr(preprocess, "preprocess_for_inference"):
-            adata = preprocess.preprocess_for_inference(adata)
+            adata = preprocess.preprocess_for_inference(
+                adata,
+                target_sum=preprocessing_params["target_sum"],
+                min_counts=min_counts,
+                min_genes=min_genes,
+            )
             result.steps.append(StepStatus("Preprocess", True, "Normalisation + HVG selection done"))
         else:
             adata = _fallback_preprocess(adata)
@@ -222,34 +233,19 @@ def run_pipeline(
         result.error = f"Preprocessing failed: {exc}"
         return result
 
-    # ══════════════════════════════════════════════════════════════════════════
+
     # STEP 4 — Gene alignment
-    # ══════════════════════════════════════════════════════════════════════════
+
     _log("Aligning genes to model reference...")
     try:
         gene_align = _import("gene_alignment")
         if gene_align is not None and hasattr(gene_align, "align_genes_to_training"):
-            here = Path(__file__).parent
-            # Look for the HVG reference CSV (team should provide this file)
-            hvg_candidates = [
-                here / "pbmc68k_hvg_list.csv",
-                here / f"{tissue}_hvg_list.csv",
-                here / "hvg_list.csv",
-            ]
-            hvg_csv = next((p for p in hvg_candidates if p.exists()), None)
-
-            if hvg_csv is not None:
-                training_gene_order = gene_align.load_training_gene_order(str(hvg_csv))
-                adata = gene_align.align_genes_to_training(adata, training_gene_order)
-                result.steps.append(StepStatus(
-                    "Gene Alignment", True,
-                    f"Aligned to {tissue} reference ({len(training_gene_order)} genes)",
-                ))
-            else:
-                result.steps.append(StepStatus(
-                    "Gene Alignment", True,
-                    "HVG reference CSV not found — genes used as-is (ask team for pbmc68k_hvg_list.csv)",
-                ))
+            training_gene_order = bundle["training_gene_order"]
+            adata = gene_align.align_genes_to_training(adata, training_gene_order)
+            result.steps.append(StepStatus(
+                "Gene Alignment", True,
+                f"Aligned to model reference ({len(training_gene_order)} genes)",
+            ))
         else:
             result.steps.append(StepStatus(
                 "Gene Alignment", True,
@@ -260,20 +256,31 @@ def run_pipeline(
             "Gene Alignment", False, f"Warning: {exc} — continuing with available genes"
         ))
 
-    # ══════════════════════════════════════════════════════════════════════════
+
     # STEP 5 — Prediction
-    # ══════════════════════════════════════════════════════════════════════════
+
     _log("Running cell-type prediction...")
     try:
-        model_mod = _import("model")
-        if model_mod is not None and hasattr(model_mod, "predict"):
-            pred_result = model_mod.predict(adata, tissue=tissue)
-            predicted_labels = pred_result["labels"]
-            result.probabilities = pred_result.get("probabilities")
-            step_msg = f"{len(pd.Series(predicted_labels).unique())} cell types predicted"
-        else:
-            predicted_labels = _fallback_predict(adata, tissue)
-            step_msg = "model.py not available — demo predictions used"
+        import scipy.sparse as sp
+
+        model = bundle["model"]
+        label_encoder = bundle["label_encoder"]
+        class_names = bundle["class_names"]
+
+        if not hasattr(model, "multi_class"):
+            model.multi_class = "auto"
+
+        X = adata.X
+        if sp.issparse(X):
+            X = X.toarray()
+
+        predicted_encoded = model.predict(X)
+        predicted_labels = label_encoder.inverse_transform(predicted_encoded)
+
+        proba = model.predict_proba(X)
+        result.probabilities = pd.DataFrame(proba, columns=class_names)
+
+        step_msg = f"{len(pd.Series(predicted_labels).unique())} cell types predicted"
 
         result.predictions = pd.DataFrame({
             "cell_barcode": adata.obs_names.tolist(),
@@ -287,9 +294,9 @@ def run_pipeline(
         result.error = f"Prediction failed: {exc}"
         return result
 
-    # ══════════════════════════════════════════════════════════════════════════
+
     # STEP 6 — PCA + UMAP
-    # ══════════════════════════════════════════════════════════════════════════
+
     _log("Computing PCA and UMAP...")
     try:
         pca_umap_mod = _import("pca_umap")
@@ -303,6 +310,8 @@ def run_pipeline(
             result.steps.append(StepStatus(
                 "PCA + UMAP", True, "pca_umap.py not available — used built-in fallback"
             ))
+
+        result.pca_variance_ratio = adata.uns.get("pca", {}).get("variance_ratio", None)
     except Exception as exc:
         result.steps.append(StepStatus("PCA + UMAP", False, f"Warning: {exc}"))
         # Non-fatal: predictions are still valid without UMAP
@@ -311,9 +320,9 @@ def run_pipeline(
     result.n_cells = adata.n_obs
     result.n_genes = adata.n_vars
 
-    # ══════════════════════════════════════════════════════════════════════════
+
     # STEP 7 — Export (optional)
-    # ══════════════════════════════════════════════════════════════════════════
+
     if output_dir is not None:
         _log("Exporting results...")
         try:
@@ -330,10 +339,7 @@ def run_pipeline(
     _log("Pipeline complete.")
     return result
 
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Export helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
 def export_results(result: PipelineResult, output_dir: str | Path) -> Dict[str, Path]:
     """
@@ -391,11 +397,11 @@ def export_umap_png(result: PipelineResult, dpi: int = 150) -> bytes:
     return buf.read()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Plot helpers
-# ─────────────────────────────────────────────────────────────────────────────
 
-_PALETTE = [
+# Plot helpers
+
+
+CELL_PALETTE = [
     "#58a6ff", "#3fb950", "#f78166", "#e3b341",
     "#bc8cff", "#ff7b72", "#79c0ff", "#ffa657",
     "#56d364", "#f0883e", "#a5d6ff", "#d2a8ff",
@@ -410,7 +416,7 @@ def _export_umap(result: PipelineResult, dest, dpi: int = 150) -> None:
     coords = result.umap_coords
     labels = result.predictions["predicted_cell_type"].values
     unique_types = list(pd.Series(labels).value_counts().index)
-    color_map = {ct: _PALETTE[i % len(_PALETTE)] for i, ct in enumerate(unique_types)}
+    color_map = {ct: CELL_PALETTE[i % len(CELL_PALETTE)] for i, ct in enumerate(unique_types)}
 
     fig, ax = plt.subplots(figsize=(8, 6))
     fig.patch.set_facecolor("#0d1117")
@@ -445,7 +451,7 @@ def _export_distribution(result: PipelineResult, dest, dpi: int = 150) -> None:
     counts = result.predictions["predicted_cell_type"].value_counts()
     labels = counts.index.tolist()
     values = counts.values.tolist()
-    colors = [_PALETTE[i % len(_PALETTE)] for i in range(len(labels))]
+    colors = [CELL_PALETTE[i % len(CELL_PALETTE)] for i in range(len(labels))]
 
     fig, ax = plt.subplots(figsize=(8, max(3, len(labels) * 0.55)))
     fig.patch.set_facecolor("#0d1117")
@@ -470,9 +476,9 @@ def _export_distribution(result: PipelineResult, dest, dpi: int = 150) -> None:
     plt.close(fig)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # Fallback implementations (used when a module is not yet available)
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 _TISSUE_CELL_TYPES: Dict[str, List[str]] = {
     "pbmc":  ["B cells", "T cells (CD4+)", "T cells (CD8+)", "NK cells",
@@ -535,9 +541,9 @@ def _fallback_pca_umap(adata):
     return pca_coords, umap_coords
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+
 # CLI:  python pipeline.py <file> <tissue> [output_dir]
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:

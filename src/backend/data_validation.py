@@ -30,13 +30,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 
-# ---------------------------------------------------------------------------
+
 # Public result type
-# ---------------------------------------------------------------------------
 
 @dataclass
 class ValidationResult:
@@ -74,19 +73,14 @@ class ValidationResult:
         return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
 # Thresholds
-# ---------------------------------------------------------------------------
 
 MIN_CELLS = 10
 MIN_GENES = 50
 HIGH_DENSITY_THRESHOLD = 0.8   # fraction of non-zero entries
 
 
-# ---------------------------------------------------------------------------
 # Primary entry point (pipeline use)
-# ---------------------------------------------------------------------------
-
 def validate_adata(adata) -> ValidationResult:
     """
     Validate an already-loaded AnnData object.
@@ -139,10 +133,7 @@ def validate_adata(adata) -> ValidationResult:
 
     return result
 
-
-# ---------------------------------------------------------------------------
 # Secondary entry point (standalone / CLI use)
-# ---------------------------------------------------------------------------
 
 def validate_file(filepath: str | Path) -> ValidationResult:
     """
@@ -175,9 +166,7 @@ def validate_file(filepath: str | Path) -> ValidationResult:
     return result
 
 
-# ---------------------------------------------------------------------------
 # Internal checks
-# ---------------------------------------------------------------------------
 
 def _check_numeric(X, result: ValidationResult) -> None:
     """Check for NaN, Inf, and negative values. Operates on sparse data directly."""
@@ -207,9 +196,10 @@ def _check_numeric(X, result: ValidationResult) -> None:
 
     if result.is_valid and data.dtype.kind == "f":
         n_non_integer = int(np.sum(data != np.floor(data)))
-        if n_non_integer / max(data.size, 1) > 0.01:
+        total_elements = X.shape[0] * X.shape[1]
+        if n_non_integer / max(total_elements, 1) > 0.01:
             result.add_warning(
-                f"{n_non_integer / data.size * 100:.1f}% of expression values are non-integer. "
+                f"{n_non_integer / max(total_elements, 1) * 100:.1f}% of expression values are non-integer. "
                 f"The platform expects raw UMI count matrices; normalised input may affect results."
             )
 
@@ -253,10 +243,7 @@ def _check_density(X, result: ValidationResult) -> None:
             f"This may indicate already-normalised data."
         )
 
-
-# ---------------------------------------------------------------------------
 # CLI:  python data_validation.py <file>
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     import sys

@@ -50,11 +50,9 @@ from typing import Callable, List, Optional
 import numpy as np
 import pandas as pd
 
-from pipeline import run_pipeline, PipelineResult, StepStatus
+from pipeline import run_pipeline, PipelineResult, StepStatus, CELL_PALETTE
 
-# ---------------------------------------------------------------------------
 # Result types
-# ---------------------------------------------------------------------------
 
 @dataclass
 class DGEResult:
@@ -84,10 +82,12 @@ class AnalysisResult:
     error: str = ""
     steps: List[StepStatus] = field(default_factory=list)
 
-    predictions: Optional[pd.DataFrame] = None   # cell_barcode | predicted_cell_type
-    umap_coords: Optional[np.ndarray] = None      # (n_cells, 2)
-    pca_coords: Optional[np.ndarray] = None       # (n_cells, n_pcs)
-    adata: Optional[object] = None                # preprocessed AnnData
+    predictions: Optional[pd.DataFrame] = None      # cell_barcode | predicted_cell_type
+    probabilities: Optional[pd.DataFrame] = None    # per-class probability scores
+    umap_coords: Optional[np.ndarray] = None        # (n_cells, 2)
+    pca_coords: Optional[np.ndarray] = None         # (n_cells, n_pcs)
+    pca_variance_ratio: Optional[np.ndarray] = None # explained variance per PC
+    adata: Optional[object] = None                  # preprocessed AnnData
     n_cells: int = 0
     n_genes: int = 0
     tissue: str = ""
@@ -99,8 +99,10 @@ class AnalysisResult:
             error=pr.error,
             steps=pr.steps,
             predictions=pr.predictions,
+            probabilities=pr.probabilities,
             umap_coords=pr.umap_coords,
             pca_coords=pr.pca_coords,
+            pca_variance_ratio=pr.pca_variance_ratio,
             adata=pr.adata,
             n_cells=pr.n_cells,
             n_genes=pr.n_genes,
@@ -114,14 +116,14 @@ class AnalysisResult:
         return sorted(self.predictions["predicted_cell_type"].unique().tolist())
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def run_analysis(
     filepath: str | Path,
     tissue: str,
     progress_callback: Optional[Callable[[str], None]] = None,
+    min_counts: int = 500,
+    min_genes: int = 200,
 ) -> AnalysisResult:
     """
     Run the full cell-type prediction pipeline.
@@ -147,6 +149,8 @@ def run_analysis(
         filepath=filepath,
         tissue=tissue,
         progress_callback=progress_callback,
+        min_counts=min_counts,
+        min_genes=min_genes,
     )
     return AnalysisResult.from_pipeline(pr)
 
@@ -199,7 +203,9 @@ def run_dge(adata, group1: str, group2: str) -> DGEResult:
         return result
 
     try:
-        df = run_pairwise_dge(adata, "predicted_cell_type", group1, group2)
+        mask = adata.obs["predicted_cell_type"].isin([group1, group2])
+        adata_subset = adata[mask]
+        df = run_pairwise_dge(adata_subset, "predicted_cell_type", group1, group2)
         result.table = df
         result.volcano_png = _volcano_to_bytes(df, group1, group2)
     except Exception as exc:
@@ -235,7 +241,7 @@ def get_pca_plot_bytes(
     import matplotlib.pyplot as plt
 
     unique_types = list(pd.Series(labels).value_counts().index)
-    color_map = {ct: _PALETTE[i % len(_PALETTE)] for i, ct in enumerate(unique_types)}
+    color_map = {ct: CELL_PALETTE[i % len(CELL_PALETTE)] for i, ct in enumerate(unique_types)}
 
     fig, ax = plt.subplots(figsize=(7, 5.5))
     fig.patch.set_facecolor("#0d1117")
@@ -276,15 +282,77 @@ def get_volcano_plot_bytes(dge_result: DGEResult, dpi: int = 150) -> Optional[by
     return dge_result.volcano_png if dge_result.success else None
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
+def get_pca_variance_plot_bytes(
+    variance_ratio: np.ndarray,
+    cumulative: bool = False,
+    dpi: int = 150,
+) -> bytes:
+    """
+    Render a PCA explained variance plot and return PNG bytes.
 
-_PALETTE = [
-    "#58a6ff", "#3fb950", "#f78166", "#e3b341",
-    "#bc8cff", "#ff7b72", "#79c0ff", "#ffa657",
-    "#56d364", "#f0883e", "#a5d6ff", "#d2a8ff",
-]
+    Parameters
+    ----------
+    variance_ratio : np.ndarray
+        Per-PC explained variance ratios from adata.uns["pca"]["variance_ratio"].
+    cumulative : bool
+        If True, plot cumulative explained variance instead of per-PC.
+    dpi : int
+        Image resolution.
+
+    Returns
+    -------
+    bytes  PNG image
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    n_pcs = len(variance_ratio)
+    x = list(range(1, n_pcs + 1))
+
+    if cumulative:
+        y = np.cumsum(variance_ratio)
+        ylabel = "Cumulative Explained Variance"
+        title = "PCA · Cumulative Explained Variance"
+        color = "#3fb950"
+    else:
+        y = variance_ratio
+        ylabel = "Explained Variance Ratio"
+        title = "PCA · Explained Variance per Component"
+        color = "#58a6ff"
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    fig.patch.set_facecolor("#0d1117")
+    ax.set_facecolor("#161b22")
+
+    ax.plot(x, y, color=color, linewidth=1.8, marker="o",
+            markersize=3.5, markerfacecolor=color, markeredgewidth=0)
+
+    if cumulative:
+        for threshold in (0.80, 0.90, 0.95):
+            idx = next((i for i, v in enumerate(y) if v >= threshold), None)
+            if idx is not None:
+                ax.axhline(threshold, linestyle="--", linewidth=0.7, color="#8b949e")
+                ax.text(n_pcs * 0.98, threshold + 0.005,
+                        f"{int(threshold * 100)}%",
+                        fontsize=7, color="#8b949e", ha="right")
+
+    ax.set_xlabel("Principal Component", fontsize=10, color="#8b949e")
+    ax.set_ylabel(ylabel, fontsize=10, color="#8b949e")
+    ax.set_title(title, fontsize=11, color="#e6edf3", pad=10)
+    ax.tick_params(colors="#8b949e", labelsize=8)
+    ax.spines[:].set_color("#21262d")
+    ax.set_xlim(0, n_pcs + 1)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, facecolor="#0d1117")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+# Internal helpers
 
 
 def _volcano_to_bytes(df: pd.DataFrame, group1: str, group2: str, dpi: int = 150) -> bytes:
