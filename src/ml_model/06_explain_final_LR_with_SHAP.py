@@ -54,7 +54,8 @@ RANDOM_STATE = 42
 # Keep these small enough for fast testing.
 # You can increase EXPLAIN_SIZE later if needed.
 BACKGROUND_SIZE = 100
-EXPLAIN_SIZE = 500
+SHAP_BATCH_SIZE = 256
+SAVE_CELL_LEVEL_OUTPUT = False
 
 # Global/class-level plots
 TOP_N_GENES = 20
@@ -118,6 +119,24 @@ def normalize_shap_output(shap_values):
         return shap_values
 
     raise ValueError(f"Unexpected SHAP output shape: {shap_values.shape}")
+
+def compute_shap_values_in_batches(explainer, X, batch_size: int = 256):
+    """
+    Compute SHAP values for all cells in batches to reduce peak memory usage.
+    Returns an array with shape: cells x genes x classes
+    """
+    chunks = []
+
+    for start in range(0, X.shape[0], batch_size):
+        end = min(start + batch_size, X.shape[0])
+        batch_X = X[start:end]
+
+        batch_shap = explainer.shap_values(batch_X)
+        batch_shap = normalize_shap_output(batch_shap)
+
+        chunks.append(batch_shap)
+
+    return np.concatenate(chunks, axis=0)
 
 
 def normalize_gene_symbols(gene_symbols, training_gene_order):
@@ -285,25 +304,20 @@ print(f"Saved predictions to: {prediction_path}")
 
 
 # ======================================================================
-# 6. Prepare SHAP background and explanation subsets
+# 6. Prepare SHAP background data
 # ======================================================================
 
-print("Sampling cells for SHAP...")
+print("Preparing background data for SHAP...")
 
-background, background_idx = sample_rows(
+background, _ = sample_rows(
     X,
     max_rows=BACKGROUND_SIZE,
     random_state=RANDOM_STATE,
 )
 
-X_explain, explain_idx = sample_rows(
-    X,
-    max_rows=EXPLAIN_SIZE,
-    random_state=RANDOM_STATE + 1,
-)
-
-explained_cell_ids = adata_aligned.obs_names.astype(str)[explain_idx]
-explained_predictions = pred_labels[explain_idx]
+X_explain = X
+explained_cell_ids = adata_aligned.obs_names.astype(str).to_numpy()
+explained_predictions = pred_labels
 
 print(f"Background data shape: {background.shape}")
 print(f"Explained data shape: {X_explain.shape}")
@@ -317,8 +331,11 @@ print("Running SHAP LinearExplainer...")
 
 explainer = shap.LinearExplainer(model, background)
 
-raw_shap_values = explainer.shap_values(X_explain)
-shap_values = normalize_shap_output(raw_shap_values)
+shap_values = compute_shap_values_in_batches(
+    explainer,
+    X_explain,
+    batch_size=SHAP_BATCH_SIZE,
+)
 
 print(f"SHAP values shape: {shap_values.shape}")
 print("SHAP shape meaning: cells x genes x classes")
@@ -455,45 +472,45 @@ print(f"Saved predicted-group SHAP importance to: {predicted_group_csv_path}")
 # 12. Cell-level SHAP explanations
 # ======================================================================
 
-print("Computing cell-level SHAP explanations...")
+if SAVE_CELL_LEVEL_OUTPUT:
+    print("Computing cell-level SHAP explanations...")
 
-cell_level_rows = []
+    cell_level_rows = []
 
-for local_cell_idx, cell_id in enumerate(explained_cell_ids):
-    predicted_class = explained_predictions[local_cell_idx]
+    for local_cell_idx, cell_id in enumerate(explained_cell_ids):
+        predicted_class = explained_predictions[local_cell_idx]
 
-    if predicted_class not in class_to_index:
-        raise ValueError(
-            f"Predicted class '{predicted_class}' was not found in class_names."
-        )
+        if predicted_class not in class_to_index:
+            raise ValueError(
+                f"Predicted class '{predicted_class}' was not found in class_names."
+            )
 
-    class_idx = class_to_index[predicted_class]
+        class_idx = class_to_index[predicted_class]
 
-    cell_shap = shap_values[local_cell_idx, :, class_idx]
-    abs_cell_shap = np.abs(cell_shap)
+        cell_shap = shap_values[local_cell_idx, :, class_idx]
+        abs_cell_shap = np.abs(cell_shap)
 
-    top_gene_indices = np.argsort(abs_cell_shap)[::-1][:TOP_N_CELL_GENES]
+        top_gene_indices = np.argsort(abs_cell_shap)[::-1][:TOP_N_CELL_GENES]
 
-    for rank, gene_idx in enumerate(top_gene_indices, start=1):
-        cell_level_rows.append(
-            {
-                "cell_id": cell_id,
-                "predicted_class": predicted_class,
-                "rank": rank,
-                "ensembl_id": training_gene_order[gene_idx],
-                "gene_symbol": gene_symbols[gene_idx],
-                "shap_value": float(cell_shap[gene_idx]),
-                "abs_shap_value": float(abs_cell_shap[gene_idx]),
-                "model_input_expression": float(X_explain[local_cell_idx, gene_idx]),
-            }
-        )
+        for rank, gene_idx in enumerate(top_gene_indices, start=1):
+            cell_level_rows.append(
+                {
+                    "cell_id": cell_id,
+                    "predicted_class": predicted_class,
+                    "rank": rank,
+                    "ensembl_id": training_gene_order[gene_idx],
+                    "gene_symbol": gene_symbols[gene_idx],
+                    "shap_value": float(cell_shap[gene_idx]),
+                    "abs_shap_value": float(abs_cell_shap[gene_idx]),
+                    "model_input_expression": float(X_explain[local_cell_idx, gene_idx]),
+                }
+            )
 
-cell_level_df = pd.DataFrame(cell_level_rows)
+    cell_level_df = pd.DataFrame(cell_level_rows)
+    cell_level_csv_path = OUTPUT_DIR / "shap_top_genes_per_cell.csv"
+    cell_level_df.to_csv(cell_level_csv_path, index=False)
 
-cell_level_csv_path = OUTPUT_DIR / "shap_top_genes_per_cell.csv"
-cell_level_df.to_csv(cell_level_csv_path, index=False)
-
-print(f"Saved cell-level SHAP explanations to: {cell_level_csv_path}")
+    print(f"Saved cell-level SHAP explanations to: {cell_level_csv_path}")
 
 
 # ======================================================================
