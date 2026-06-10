@@ -131,3 +131,24 @@ Main outputs:
 - CV and final-test confusion matrix heatmaps
 - presentation summary table image
 
+## Final Level 3 Logistic Regression Model
+
+`09_train_final_LR_model_level3.py` trains the final selected Level 3 Logistic Regression model using the fine-grained label column `cell_type_level_3`.
+
+The model is trained on the full 80% development set and evaluated once on the untouched 20% test set, using the same split indices from the Level 1 experiment for consistency across all model comparisons.
+
+**Input dataset:** `pbmc68k_preprocessed_for_training.h5ad`  
+**Label column:** `cell_type_level_3`  
+**Model:** Logistic Regression without class weighting  
+**Output folder:** `results/final_LR_level3/`  
+**Model folder:** `models/LR_level3/`
+
+Main outputs:
+
+- `LR_level3_no_weight_final_model_bundle.joblib`
+- `LR_level3_no_weight_final_model_metadata.json`
+- `LR_level3_no_weight_final_test_results.xlsx`
+- final test confusion matrix tables and heatmap
+- test prediction table with predicted labels and class probabilities
+
+The saved model bundle includes the trained model, label encoder, class names, HVG gene order, gene symbols, and preprocessing parameters needed for inference integration.
