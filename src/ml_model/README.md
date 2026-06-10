@@ -94,3 +94,40 @@ Main outputs:
 
 <img width="3870" height="1106" alt="all_models_level3_presentation_summary_table" src="https://github.com/user-attachments/assets/19eb6cbe-30e7-4fe4-b2f8-b137cd02ee4e" />
 
+
+## Level 3 PCA/SVD Experiment
+
+`08_compare_all_models_level3_PCA.py` tests whether dimensionality reduction improves Level 3 cell-type prediction.
+
+The script uses the same 2000-HVG input matrix and the same 80/20 development-test split as the previous comparisons, but adds a PCA-style dimensionality reduction step before model training. Since the dataset is large and sparse, TruncatedSVD is used as a memory-friendly PCA-like method.
+
+It evaluates the same six configurations:
+
+- Logistic Regression, with and without class weighting
+- Linear SVM, with and without class weighting
+- Random Forest, with and without class weighting
+
+Both 50 and 200 components were tested. However, PCA/SVD did not improve performance; instead, the scores decreased compared with the direct 2000-HVG Level 3 models. This suggests that dimensionality reduction removed gene-level information that is important for distinguishing fine-grained cell subtypes.
+
+### all models level 3 PCA presentation summary table 50 PC
+<img width="4170" height="1225" alt="all_models_level3_PCA_presentation_summary_table_50PC" src="https://github.com/user-attachments/assets/9626cf08-56a4-44e0-89c9-8dfa823c71d1" />
+
+### all models level 3 PCA presentation summary table 200 PC
+<img width="4170" height="1225" alt="all_models_level3_PCA_presentation_summary_table(200PC)" src="https://github.com/user-attachments/assets/17cc94d7-3c09-4413-828e-cc1cc8970fac" />
+
+
+Based on this experiment, the direct 2000-HVG representation was kept for further model development because it preserved more biological signal and remained more interpretable for gene-level analysis.
+
+**Input dataset:** `pbmc68k_preprocessed_for_training.h5ad`  
+**Label column:** `cell_type_level_3`  
+**Output folder:** `results/all_models_level3_PCA/`
+
+Main outputs:
+
+- PCA/SVD model comparison Excel files
+- metadata JSON file
+- split index file
+- explained variance tables/plots
+- CV and final-test confusion matrix heatmaps
+- presentation summary table image
+
