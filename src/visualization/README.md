@@ -24,8 +24,6 @@ Generated figures:
 - `umap_cell_type.png`
 - `umap_cell_type_level_1.png`
 
----
-
 ### `pca_variance_analysis.py`
 
 Analyzes the variance explained by principal components.
@@ -36,8 +34,6 @@ Generated figures:
 - `pca_cumulative_variance.png`
 
 These plots were used to determine an appropriate number of principal components for downstream analyses.
-
----
 
 ### `tsne.py`
 
@@ -84,23 +80,23 @@ While t-SNE successfully separated major cell populations, UMAP provided a clear
 
 ### PCA
 
-<img src="https://raw.githubusercontent.com/gizembydmr/Capstone_project_scRNAseq_cell_classifier/main/src/visualization/figures/pca_cell_type_level_1.png" width="700">
+![PCA](figures/pca_cell_type_level_1.png)
 
 ### PCA Variance Ratio
 
-<img src="https://raw.githubusercontent.com/gizembydmr/Capstone_project_scRNAseq_cell_classifier/main/src/visualization/figures/pca_variance_ratio.png" width="700">
+![PCA Variance Ratio](figures/pca_variance_ratio.png)
 
 ### PCA Cumulative Variance
 
-<img src="https://raw.githubusercontent.com/gizembydmr/Capstone_project_scRNAseq_cell_classifier/main/src/visualization/figures/pca_cumulative_variance.png" width="700">
+![PCA Cumulative Variance](figures/pca_cumulative_variance.png)
 
 ### UMAP (Primary Visualization)
 
-<img src="https://raw.githubusercontent.com/gizembydmr/Capstone_project_scRNAseq_cell_classifier/main/src/visualization/figures/umap_cell_type_level_1.png" width="700">
+![UMAP](figures/umap_cell_type_level_1.png)
 
 ### Additional Analysis: t-SNE
 
-<img src="https://raw.githubusercontent.com/gizembydmr/Capstone_project_scRNAseq_cell_classifier/main/src/visualization/figures/tsne_cell_type_level_1.png" width="700">
+![t-SNE](figures/tsne_cell_type_level_1.png)
 
 ---
 
