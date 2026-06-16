@@ -158,13 +158,20 @@ html, body, [class*="css"] {
     margin-top: 4px;
 }
 
-/* ── Tissue selector ────────────────────────────── */
-.stSelectbox label { font-size: 13px; color: #8b949e !important; }
-.stSelectbox > div > div {
-    background: #0d1117!important;
-    border-color: #30363d!important;
-    color: #e6edf3!important;
-    border-radius: 8px!important;
+/* ── Slider labels & values ─────────────────────── */
+[data-testid="stSlider"] label,
+[data-testid="stSlider"] > label,
+[data-testid="stSlider"] p,
+.stSlider label {
+    color: #e6edf3 !important;
+    font-size: 13px !important;
+    opacity: 1 !important;
+}
+[data-testid="stSlider"] [data-testid="stTickBarMin"],
+[data-testid="stSlider"] [data-testid="stTickBarMax"],
+[data-testid="stSlider"] output {
+    color: #58a6ff !important;
+    opacity: 1 !important;
 }
 
 /* ── Buttons ────────────────────────────────────── */
@@ -175,8 +182,10 @@ html, body, [class*="css"] {
     border-radius: 8px;
     font-weight: 600;
     font-size: 14px;
-    padding: 10px 28px;
+    padding: 10px 16px;
     width: 100%;
+    min-width: 80px;
+    white-space: nowrap;
     cursor: pointer;
     transition: background 0.2s;
 }
