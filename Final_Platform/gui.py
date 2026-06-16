@@ -425,8 +425,23 @@ with tab_model_info:
 
         with detail_col1:
             st.markdown('<div class="card-title">Predicted Cell Types</div>', unsafe_allow_html=True)
+            st.markdown("""
+            <style>
+            .cell-type-list li {
+                white-space: nowrap;
+                font-family: 'IBM Plex Mono', monospace;
+                color: #58f29b;
+                margin-bottom: 10px;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+            
+            cell_types_html = "<ul class='cell-type-list'>"
             for ct in meta.get("class_names", []):
-                st.markdown(f"- `{ct}`")
+                cell_types_html += f"<li>{ct}</li>"
+            cell_types_html += "</ul>"
+            
+            st.markdown(cell_types_html, unsafe_allow_html=True)
 
         with detail_col2:
             st.markdown('<div class="card-title">Preprocessing Parameters</div>', unsafe_allow_html=True)
