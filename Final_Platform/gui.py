@@ -891,40 +891,81 @@ with tab_predict:
             shap_tab_global, shap_tab_group = st.tabs(["Global Top Genes", "Per Cell Type"])
 
             with shap_tab_global:
-                st.markdown('<div class="card-title">Top 20 Genes — All Classes</div>', unsafe_allow_html=True)
-                img_global = get_shap_bar_plot_bytes(
-                    shap_global_df, title="Global SHAP Gene Importance", top_n=20
-                )
-                st.image(img_global, use_container_width=True)
-                st.download_button(
-                    label="⬇  Download Global Importance (CSV)",
-                    data=shap_global_df.to_csv(index=False).encode("utf-8"),
-                    file_name="shap_global_gene_importance.csv",
-                    mime="text/csv",
-                    key="dl_shap_global",
-                )
+                shap_plot_col, shap_table_col = st.columns([2, 1], gap="large")
+
+                with shap_plot_col:
+                    st.markdown('<div class="card-title">Top 20 Genes — All Classes</div>', unsafe_allow_html=True)
+                    img_global = get_shap_bar_plot_bytes(
+                        shap_global_df, title="Global SHAP Gene Importance", top_n=20
+                    )
+                    st.image(img_global, use_container_width=True)
+                    st.download_button(
+                        label="⬇  Download Plot (PNG)",
+                        data=img_global,
+                        file_name="shap_global_top_genes.png",
+                        mime="image/png",
+                        key="dl_shap_global_png",
+                    )
+
+                with shap_table_col:
+                    st.markdown('<div class="card-title">Top Genes</div>', unsafe_allow_html=True)
+                    st.dataframe(
+                        shap_global_df[["gene_label", "mean_abs_shap"]].head(20).reset_index(drop=True),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.download_button(
+                        label="⬇  Download CSV",
+                        data=shap_global_df.to_csv(index=False).encode("utf-8"),
+                        file_name="shap_global_gene_importance.csv",
+                        mime="text/csv",
+                        key="dl_shap_global_csv",
+                    )
 
             with shap_tab_group:
                 if shap_group_df is not None:
-                    available_groups = sorted(shap_group_df["predicted_group"].unique().tolist())
-                    selected_group = st.selectbox(
-                        "Select cell type", options=available_groups, key="shap_group_sel"
-                    )
+                    shap_sel_col, shap_info_col = st.columns([2, 1], gap="large")
+
+                    with shap_sel_col:
+                        available_groups = sorted(shap_group_df["predicted_group"].unique().tolist())
+                        selected_group = st.selectbox(
+                            "Select cell type", options=available_groups, key="shap_group_sel"
+                        )
+
                     group_df = shap_group_df[shap_group_df["predicted_group"] == selected_group]
                     n_cells_group = int(group_df["n_cells"].iloc[0]) if "n_cells" in group_df.columns else "?"
-                    st.caption(f"{n_cells_group} cells predicted as {selected_group}")
 
-                    img_group = get_shap_bar_plot_bytes(
-                        group_df, title=f"Top Genes · {selected_group}", top_n=15,
-                    )
-                    st.image(img_group, use_container_width=True)
-                    st.download_button(
-                        label="⬇  Download Group Importance (CSV)",
-                        data=shap_group_df.to_csv(index=False).encode("utf-8"),
-                        file_name="shap_group_gene_importance.csv",
-                        mime="text/csv",
-                        key="dl_shap_group",
-                    )
+                    shap_g_plot, shap_g_table = st.columns([2, 1], gap="large")
+
+                    with shap_g_plot:
+                        st.markdown(f'<div class="card-title">Top Genes · {selected_group}</div>', unsafe_allow_html=True)
+                        st.caption(f"{n_cells_group} cells predicted as {selected_group}")
+                        img_group = get_shap_bar_plot_bytes(
+                            group_df, title=f"Top Genes · {selected_group}", top_n=15,
+                        )
+                        st.image(img_group, use_container_width=True)
+                        st.download_button(
+                            label="⬇  Download Plot (PNG)",
+                            data=img_group,
+                            file_name=f"shap_{selected_group.replace(' ','_')}.png",
+                            mime="image/png",
+                            key="dl_shap_group_png",
+                        )
+
+                    with shap_g_table:
+                        st.markdown('<div class="card-title">Top Genes</div>', unsafe_allow_html=True)
+                        st.dataframe(
+                            group_df[["gene_label", "mean_abs_shap"]].head(15).reset_index(drop=True),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        st.download_button(
+                            label="⬇  Download CSV",
+                            data=shap_group_df.to_csv(index=False).encode("utf-8"),
+                            file_name="shap_group_gene_importance.csv",
+                            mime="text/csv",
+                            key="dl_shap_group_csv",
+                        )
         else:
             st.info("SHAP analysis not available. Install `shap` package: pip install shap")
 
