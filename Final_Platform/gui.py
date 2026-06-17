@@ -435,12 +435,12 @@ with tab_model_info:
             }
             </style>
             """, unsafe_allow_html=True)
-            
+
             cell_types_html = "<ul class='cell-type-list'>"
             for ct in meta.get("class_names", []):
                 cell_types_html += f"<li>{ct}</li>"
             cell_types_html += "</ul>"
-            
+
             st.markdown(cell_types_html, unsafe_allow_html=True)
 
         with detail_col2:
@@ -919,6 +919,19 @@ with tab_predict:
                     )
                     if dge_res.volcano_png:
                         st.image(dge_res.volcano_png, use_container_width=True)
+
+                        if isinstance(dge_res.volcano_png, (bytes, bytearray)):
+                            _volcano_bytes = bytes(dge_res.volcano_png)
+                        else:
+                            with open(dge_res.volcano_png, "rb") as _f:
+                                _volcano_bytes = _f.read()
+                        safe_name = f"{g1}_vs_{g2}".replace("/", "_").replace(" ", "_")
+                        st.download_button(
+                            label="⬇  Download Volcano Plot (PNG)",
+                            data=_volcano_bytes,
+                            file_name=f"volcano_{safe_name}.png",
+                            mime="image/png",
+                        )
 
                 with dge_table_col:
                     st.markdown(
