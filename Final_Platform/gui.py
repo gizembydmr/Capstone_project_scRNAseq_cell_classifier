@@ -280,6 +280,18 @@ TISSUE_MODELS: dict[str, dict] = {
         "description": "Pre-trained on 10x Genomics PBMC 3k & 68k datasets.",
         "available": True,
     },
+    "Pancreas": {
+        "key": "pancreas",
+        "cell_types": ["B cell", "CD4+ T cell", "CD8+ T cell",
+                        "Classical Monocytes", "Endothelial cells", "Fibroblasts",
+                        "Intermediate Monocytes", "Macrophages", "NK cells",
+                        "Pancreatic A cells (Alpha)", "Pancreatic Acinar cells",
+                        "Pancreatic Ductal cells", "Pancreatic Stellate cells",
+                        "Type B Pancreatic cells (Beta)"],
+        "model_file": "models/Pancreas_Model/pancreas_LR_balanced_level3_final_model_bundle.joblib",
+        "description": "Pre-trained on human pancreas scRNA-seq reference data.",
+        "available": True,
+    },
     "Lung (Coming Soon)": {
         "key": "lung",
         "cell_types": ["AT1 cells", "AT2 cells", "Club cells", "Ciliated cells",
@@ -378,9 +390,43 @@ tab_predict, tab_model_info = st.tabs(["🔬  Prediction", "📊  Model Info"])
 with tab_model_info:
     import json
 
-    meta_path = Path(__file__).parent / "models" / "LR_level3_no_weight_final_model_metadata.json"
+    # Each tissue's model bundle has a matching metadata JSON sitting next to
+    # it. Add new tissues here as their metadata files become available.
+    TISSUE_METADATA_PATHS: dict[str, str] = {
+        "pbmc": "models/LR_level3_no_weight_final_model_metadata.json",
+        "pancreas": "models/Pancreas_Model/pancreas_LR_balanced_level3_final_model_metadata.json",
+    }
 
-    if meta_path.exists():
+    # Only offer tissues that actually have a trained model — "Coming Soon"
+    # tissues have no metadata to show.
+    _info_tissue_options = [
+        name for name, info in TISSUE_MODELS.items() if info.get("available", False)
+    ]
+
+    st.markdown('<div class="card-title">Select Model to Inspect</div>', unsafe_allow_html=True)
+
+    _info_tissue_choice = st.selectbox(
+        "Model",
+        options=_info_tissue_options,
+        index=0,
+        label_visibility="collapsed",
+        key="model_info_tissue_choice",
+        help="Independent of the tissue selected on the Prediction tab — "
+             "browsing here won't change what model is used to run predictions.",
+    )
+
+    _info_tissue_key = TISSUE_MODELS[_info_tissue_choice]["key"]
+    _meta_rel_path = TISSUE_METADATA_PATHS.get(_info_tissue_key)
+
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+    meta_path = (
+        Path(__file__).parent / _meta_rel_path
+        if _meta_rel_path is not None
+        else None
+    )
+
+    if meta_path is not None and meta_path.exists():
         with open(meta_path, "r") as f:
             meta = json.load(f)
 
@@ -466,7 +512,15 @@ with tab_model_info:
         st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
     else:
-        st.warning("Model metadata file not found.")
+        if _meta_rel_path is None:
+            st.warning(
+                f"No metadata file is configured for '{_info_tissue_choice}' yet."
+            )
+        else:
+            st.warning(
+                f"Model metadata file not found for '{_info_tissue_choice}' "
+                f"at '{meta_path}'."
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -560,10 +614,12 @@ with tab_predict:
         tissue_choice = st.selectbox(
             "Tissue",
             options=list(TISSUE_MODELS.keys()),
-            index=0,
+            index=list(TISSUE_MODELS.keys()).index(
+                st.session_state.get("selected_tissue", list(TISSUE_MODELS.keys())[0])
+            ),
             label_visibility="collapsed",
+            key="selected_tissue",
         )
-        st.session_state.selected_tissue = tissue_choice
         model_info = TISSUE_MODELS[tissue_choice]
 
         st.caption(f"ℹ️  {model_info['description']}")
