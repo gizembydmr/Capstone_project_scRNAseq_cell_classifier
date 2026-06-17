@@ -331,6 +331,7 @@ def _init_state() -> None:
         "n_cells": 0,
         "n_genes": 0,
         "selected_tissue": list(TISSUE_MODELS.keys())[0],
+        "predicted_tissue": None,
         "pca_coords": None,
         "pca_variance_ratio": None,
         "dge_result": None,
@@ -534,6 +535,7 @@ with tab_predict:
                     st.session_state.run_complete = False
                     st.session_state.predictions = None
                     st.session_state.umap_coords = None
+                    st.session_state.predicted_tissue = None
 
             vr = st.session_state.get("validation_result")
             if vr and vr.is_valid:
@@ -670,6 +672,7 @@ with tab_predict:
                 st.session_state.shap_group_df      = result.shap_group_df
                 st.session_state.shap_class_df      = result.shap_class_df
                 st.session_state.adata              = result.adata
+                st.session_state.predicted_tissue   = tissue_choice
                 st.session_state.run_complete       = True
                 st.session_state.n_cells            = result.n_cells
                 st.session_state.n_genes            = result.n_genes
@@ -710,6 +713,8 @@ with tab_predict:
 
             cell_type_counts = predictions["predicted_cell_type"].value_counts()
             n_cell_types = len(cell_type_counts)
+            result_tissue = st.session_state.get("predicted_tissue") or st.session_state.selected_tissue
+            result_tissue_short = result_tissue.split("(")[0].strip()
 
             # ── Quick Stats ───────────────────────────────────────────────────
             st.markdown('<div class="card-title">Results · Quick Stats</div>', unsafe_allow_html=True)
@@ -719,7 +724,7 @@ with tab_predict:
                 (f"{n_cells:,}", "Cells"),
                 (f"{n_genes:,}", "Genes"),
                 (f"{n_cell_types}", "Cell Types"),
-                (f"{st.session_state.selected_tissue.split('(')[0].strip().split()[0]}", "Tissue"),
+                (result_tissue_short, "Tissue"),
             ]
             for col, (val, label) in zip(stat_cols, stats):
                 with col:
@@ -811,7 +816,7 @@ with tab_predict:
             pred_labels = predictions["predicted_cell_type"].values
             unique_types = list(cell_type_counts.index)
             color_map = {ct: CELL_PALETTE[i % len(CELL_PALETTE)] for i, ct in enumerate(unique_types)}
-            tissue_short = tissue_choice.split("(")[0].strip()
+            tissue_short = result_tissue_short
 
             def _scatter(ax, coords, title, xlabel, ylabel):
                 for ct in unique_types:
@@ -1069,6 +1074,7 @@ with tab_predict:
                         "probabilities", "umap_coords", "pca_coords", "pca_variance_ratio",
                         "shap_global_df", "shap_group_df", "shap_class_df",
                         "run_complete", "n_cells", "n_genes", "dge_result", "dge_groups_done",
+                        "predicted_tissue",
                         "last_uploaded_filename", "tmp_path"]:
                 st.session_state.pop(key, None)
             st.rerun()
