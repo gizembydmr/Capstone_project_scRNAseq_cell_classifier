@@ -927,7 +927,7 @@ with tab_predict:
                                 _volcano_bytes = _f.read()
                         safe_name = f"{g1}_vs_{g2}".replace("/", "_").replace(" ", "_")
                         st.download_button(
-                            label="⬇  Download Volcano Plot (PNG)",
+                            label="Download Volcano Plot (PNG)",
                             data=_volcano_bytes,
                             file_name=f"volcano_{safe_name}.png",
                             mime="image/png",
