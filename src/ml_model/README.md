@@ -178,11 +178,11 @@ Main outputs:
 
 <img width="4470" height="2669" alt="LR_level3_unassigned_threshold_summary_table" src="https://github.com/user-attachments/assets/24a6ecb6-3d43-4eba-99f0-53e15698d7d5" />
 
-The tested thresholds ranged from 0.30 to 0.90. Increasing the threshold improved accuracy and Macro F1 among assigned cells, but also increased the number of cells labeled as `Unassigned`. Therefore, the threshold was selected by considering both prediction reliability and cell coverage, rather than using accuracy alone.
+The tested thresholds ranged from 0.30 to 0.90. Increasing the threshold improved accuracy and Macro F1 among assigned cells, but also increased the number of cells labeled as Unassigned. Therefore, the threshold was not selected using accuracy or Macro F1 alone. Instead, a coverage-based selection rule was used: the threshold was selected as the highest tested threshold that preserved at least 95% assigned-cell coverage. This rule was chosen because the model is intended to be used as a practical annotation tool in the GUI, where most cells should still receive a useful predicted label, while the lowest-confidence predictions should still be flagged.
 
 <img width="3264" height="1692" alt="LR_level3_unassigned_threshold_assigned_unassigned_plot" src="https://github.com/user-attachments/assets/54140be9-5002-4b54-a064-50bf76bbda93" />
 
-A threshold of **0.50** was selected for the final model. This threshold kept most cells assigned while still filtering the lowest-confidence predictions. At this threshold, approximately **95.21%** of cells remained assigned and **4.79%** were labeled as `Unassigned`. Accuracy on assigned cells increased to approximately **88.29%**, and Macro F1 on assigned cells increased to approximately **76.53%**. Higher thresholds gave better assigned-cell scores, but rejected too many cells, making them less suitable for the MVP.
+Using this rule, a threshold of 0.50 was selected for the final PBMC Level 3 model. This was the highest tested threshold that kept assigned-cell coverage above 95%. At this threshold, approximately 95.21% of cells remained assigned and 4.79% were labeled as Unassigned. Accuracy on assigned cells was approximately 88.29%, and Macro F1 on assigned cells was approximately 76.53%. Higher thresholds gave better assigned-cell scores, but they reduced assigned-cell coverage below the selected 95% requirement.
 
 ## Final Level 3 Logistic Regression Model with Unassigned Feature
 
