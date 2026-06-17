@@ -87,11 +87,6 @@ class AnalysisResult:
     umap_coords: Optional[np.ndarray] = None        # (n_cells, 2)
     pca_coords: Optional[np.ndarray] = None         # (n_cells, n_pcs)
     pca_variance_ratio: Optional[np.ndarray] = None # explained variance per PC
-
-    shap_global_df: Optional[pd.DataFrame] = None   # global gene importance
-    shap_group_df: Optional[pd.DataFrame] = None    # per predicted group importance
-    shap_class_df: Optional[pd.DataFrame] = None    # per class importance
-
     adata: Optional[object] = None                  # preprocessed AnnData
     n_cells: int = 0
     n_genes: int = 0
@@ -108,9 +103,6 @@ class AnalysisResult:
             umap_coords=pr.umap_coords,
             pca_coords=pr.pca_coords,
             pca_variance_ratio=pr.pca_variance_ratio,
-            shap_global_df=pr.shap_global_df,
-            shap_group_df=pr.shap_group_df,
-            shap_class_df=pr.shap_class_df,
             adata=pr.adata,
             n_cells=pr.n_cells,
             n_genes=pr.n_genes,
@@ -132,7 +124,6 @@ def run_analysis(
     progress_callback: Optional[Callable[[str], None]] = None,
     min_counts: int = 500,
     min_genes: int = 200,
-    run_shap: bool = True,
 ) -> AnalysisResult:
     """
     Run the full cell-type prediction pipeline.
@@ -160,7 +151,6 @@ def run_analysis(
         progress_callback=progress_callback,
         min_counts=min_counts,
         min_genes=min_genes,
-        run_shap=run_shap,
     )
     return AnalysisResult.from_pipeline(pr)
 
@@ -303,50 +293,6 @@ def get_pca_plot_bytes(
     return buf.read()
 
 
-def get_shap_bar_plot_bytes(
-    df: pd.DataFrame,
-    title: str,
-    top_n: int = 20,
-    dpi: int = 150,
-) -> bytes:
-    """
-    Render a horizontal bar chart of SHAP gene importance and return PNG bytes.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Must contain columns 'gene_label' and 'mean_abs_shap'.
-    title : str
-        Plot title.
-    top_n : int
-        Number of top genes to show.
-    """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    top = df.head(top_n).iloc[::-1].copy()
-
-    fig, ax = plt.subplots(figsize=(8, max(4, top_n * 0.38)))
-    fig.patch.set_facecolor("#0d1117")
-    ax.set_facecolor("#161b22")
-
-    ax.barh(top["gene_label"], top["mean_abs_shap"],
-            color="#58a6ff", height=0.65, edgecolor="none")
-
-    ax.set_xlabel("Mean |SHAP value|", fontsize=10, color="#8b949e", labelpad=8)
-    ax.tick_params(colors="#8b949e", labelsize=9)
-    ax.spines[:].set_visible(False)
-    ax.set_title(title, fontsize=12, color="#e6edf3", pad=10)
-    plt.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, facecolor="#0d1117")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
-
-
 def get_volcano_plot_bytes(dge_result: DGEResult, dpi: int = 150) -> Optional[bytes]:
     """Return the cached volcano plot bytes from a DGEResult, or None."""
     return dge_result.volcano_png if dge_result.success else None
@@ -420,7 +366,3 @@ def get_pca_variance_plot_bytes(
     plt.close(fig)
     buf.seek(0)
     return buf.read()
-
-
-
-
