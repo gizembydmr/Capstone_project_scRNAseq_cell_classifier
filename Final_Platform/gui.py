@@ -335,6 +335,9 @@ def _init_state() -> None:
         "pca_variance_ratio": None,
         "dge_result": None,
         "dge_groups_done": ("", ""),
+        "shap_global_df": None,
+        "shap_group_df": None,
+        "shap_class_df": None,
         "min_counts_val": 500,
         "min_genes_val": 200,
     }
@@ -658,18 +661,18 @@ with tab_predict:
             status_text.empty()
 
             if result.success:
-                st.session_state.predictions       = result.predictions
-                st.session_state.probabilities     = result.probabilities
-                st.session_state.umap_coords       = result.umap_coords
-                st.session_state.pca_coords        = result.pca_coords
+                st.session_state.predictions        = result.predictions
+                st.session_state.probabilities      = result.probabilities
+                st.session_state.umap_coords        = result.umap_coords
+                st.session_state.pca_coords         = result.pca_coords
                 st.session_state.pca_variance_ratio = result.pca_variance_ratio
-                st.session_state.adata             = result.adata
-                st.session_state.run_complete      = True
-                st.session_state.n_cells           = result.n_cells
-                st.session_state.n_genes           = result.n_genes
-                st.session_state.shap_global_df = result.shap_global_df
-                st.session_state.shap_group_df = result.shap_group_df
-                st.session_state.shap_class_df = result.shap_class_df
+                st.session_state.shap_global_df     = result.shap_global_df
+                st.session_state.shap_group_df      = result.shap_group_df
+                st.session_state.shap_class_df      = result.shap_class_df
+                st.session_state.adata              = result.adata
+                st.session_state.run_complete       = True
+                st.session_state.n_cells            = result.n_cells
+                st.session_state.n_genes            = result.n_genes
                 st.rerun()
             else:
                 st.error(f"**Pipeline failed:** {result.error}")
@@ -873,6 +876,58 @@ with tab_predict:
                 else:
                     st.info("PCA coordinates not available.")
 
+    # ── 05 · SHAP Gene Importance ─────────────────────────────────────────────
+    if st.session_state.run_complete:
+        shap_global_df = st.session_state.get("shap_global_df")
+        shap_group_df  = st.session_state.get("shap_group_df")
+
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">05 · SHAP Gene Importance</div>', unsafe_allow_html=True)
+        st.caption("Which genes drove each cell type prediction? (SHAP LinearExplainer)")
+
+        if shap_global_df is not None:
+            from backend import get_shap_bar_plot_bytes
+
+            shap_tab_global, shap_tab_group = st.tabs(["Global Top Genes", "Per Cell Type"])
+
+            with shap_tab_global:
+                st.markdown('<div class="card-title">Top 20 Genes — All Classes</div>', unsafe_allow_html=True)
+                img_global = get_shap_bar_plot_bytes(
+                    shap_global_df, title="Global SHAP Gene Importance", top_n=20
+                )
+                st.image(img_global, use_container_width=True)
+                st.download_button(
+                    label="⬇  Download Global Importance (CSV)",
+                    data=shap_global_df.to_csv(index=False).encode("utf-8"),
+                    file_name="shap_global_gene_importance.csv",
+                    mime="text/csv",
+                    key="dl_shap_global",
+                )
+
+            with shap_tab_group:
+                if shap_group_df is not None:
+                    available_groups = sorted(shap_group_df["predicted_group"].unique().tolist())
+                    selected_group = st.selectbox(
+                        "Select cell type", options=available_groups, key="shap_group_sel"
+                    )
+                    group_df = shap_group_df[shap_group_df["predicted_group"] == selected_group]
+                    n_cells_group = int(group_df["n_cells"].iloc[0]) if "n_cells" in group_df.columns else "?"
+                    st.caption(f"{n_cells_group} cells predicted as {selected_group}")
+
+                    img_group = get_shap_bar_plot_bytes(
+                        group_df, title=f"Top Genes · {selected_group}", top_n=15,
+                    )
+                    st.image(img_group, use_container_width=True)
+                    st.download_button(
+                        label="⬇  Download Group Importance (CSV)",
+                        data=shap_group_df.to_csv(index=False).encode("utf-8"),
+                        file_name="shap_group_gene_importance.csv",
+                        mime="text/csv",
+                        key="dl_shap_group",
+                    )
+        else:
+            st.info("SHAP analysis not available. Install `shap` package: pip install shap")
+
     # ── 04 · Differential Gene Expression ────────────────────────────────────
     if st.session_state.run_complete and st.session_state.predictions is not None:
 
@@ -930,7 +985,7 @@ with tab_predict:
                                 _volcano_bytes = _f.read()
                         safe_name = f"{g1}_vs_{g2}".replace("/", "_").replace(" ", "_")
                         st.download_button(
-                            label="Download Volcano Plot (PNG)",
+                            label="⬇  Download Volcano Plot (PNG)",
                             data=_volcano_bytes,
                             file_name=f"volcano_{safe_name}.png",
                             mime="image/png",
@@ -971,6 +1026,7 @@ with tab_predict:
         if st.button("↺  Upload New Dataset"):
             for key in ["validated", "adata", "validation_result", "predictions",
                         "probabilities", "umap_coords", "pca_coords", "pca_variance_ratio",
+                        "shap_global_df", "shap_group_df", "shap_class_df",
                         "run_complete", "n_cells", "n_genes", "dge_result", "dge_groups_done",
                         "last_uploaded_filename", "tmp_path"]:
                 st.session_state.pop(key, None)
