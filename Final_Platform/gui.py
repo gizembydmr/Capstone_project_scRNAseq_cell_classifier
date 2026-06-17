@@ -667,6 +667,9 @@ with tab_predict:
                 st.session_state.run_complete      = True
                 st.session_state.n_cells           = result.n_cells
                 st.session_state.n_genes           = result.n_genes
+                st.session_state.shap_global_df = result.shap_global_df
+                st.session_state.shap_group_df = result.shap_group_df
+                st.session_state.shap_class_df = result.shap_class_df
                 st.rerun()
             else:
                 st.error(f"**Pipeline failed:** {result.error}")
@@ -927,7 +930,7 @@ with tab_predict:
                                 _volcano_bytes = _f.read()
                         safe_name = f"{g1}_vs_{g2}".replace("/", "_").replace(" ", "_")
                         st.download_button(
-                            label="⬇  Download Volcano Plot (PNG)",
+                            label="Download Volcano Plot (PNG)",
                             data=_volcano_bytes,
                             file_name=f"volcano_{safe_name}.png",
                             mime="image/png",
