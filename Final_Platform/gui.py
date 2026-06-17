@@ -378,7 +378,7 @@ tab_predict, tab_model_info = st.tabs(["🔬  Prediction", "📊  Model Info"])
 with tab_model_info:
     import json
 
-    meta_path = Path(__file__).parent / "models" / "LR_level1_no_weight_final_model_metadata.json"
+    meta_path = Path(__file__).parent / "models" / "LR_level3_no_weight_final_model_metadata.json"
 
     if meta_path.exists():
         with open(meta_path, "r") as f:
