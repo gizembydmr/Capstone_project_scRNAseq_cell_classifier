@@ -87,6 +87,10 @@ class PipelineResult:
     pca_coords: Optional[np.ndarray] = None        # (n_cells, n_pcs)
     pca_variance_ratio: Optional[np.ndarray] = None  # explained variance per PC
 
+    shap_global_df: Optional[pd.DataFrame] = None   # global gene importance
+    shap_group_df: Optional[pd.DataFrame] = None    # per predicted group importance
+    shap_class_df: Optional[pd.DataFrame] = None    # per class importance
+
     adata: Optional[object] = None                 # preprocessed AnnData
     n_cells: int = 0
     n_genes: int = 0
@@ -116,6 +120,7 @@ def run_pipeline(
     progress_callback: Optional[Callable[[str], None]] = None,
     min_counts: int = 500,
     min_genes: int = 200,
+    run_shap: bool = True,
 ) -> PipelineResult:
     """
     Execute the full cell-type prediction pipeline.
@@ -143,12 +148,35 @@ def run_pipeline(
             progress_callback(msg)
 
     # Load model bundle (used in Steps 3, 4, 5)
+    # Each tissue has its own trained model bundle (LogisticRegression + label
+    # encoder + training gene order + preprocessing params). Add new tissues
+    # here as their bundles become available.
+    TISSUE_MODEL_BUNDLES: Dict[str, str] = {
+        "pbmc": "models/LR_level3_no_weight_final_model_bundle.joblib",
+        "pancreas": "models/Pancreas_Model/pancreas_LR_balanced_level3_final_model_bundle.joblib",
+    }
+
+    tissue_key = tissue.lower()
+    bundle_rel_path = TISSUE_MODEL_BUNDLES.get(tissue_key)
+    if bundle_rel_path is None:
+        result.error = (
+            f"No trained model bundle is configured for tissue '{tissue}'. "
+            f"Available tissues: {sorted(TISSUE_MODEL_BUNDLES.keys())}"
+        )
+        return result
+
     try:
         import joblib
-        bundle_path = Path(__file__).parent / "LR_level3_no_weight_final_model_bundle.joblib"
+        bundle_path = Path(__file__).parent / bundle_rel_path
+        if not bundle_path.exists():
+            result.error = (
+                f"Model bundle for tissue '{tissue}' not found at '{bundle_path}'. "
+                f"Make sure the file has been placed there."
+            )
+            return result
         bundle = joblib.load(bundle_path)
     except Exception as exc:
-        result.error = f"Could not load model bundle: {exc}"
+        result.error = f"Could not load model bundle for tissue '{tissue}': {exc}"
         return result
 
     # STEP 1 — Load data
@@ -321,7 +349,27 @@ def run_pipeline(
     result.n_genes = adata.n_vars
 
 
-    # STEP 7 — Export (optional)
+    # STEP 7 — SHAP Analysis (optional)
+
+    if run_shap:
+        _log("Running SHAP analysis...")
+        try:
+            shap_global, shap_group, shap_class = _run_shap_analysis(
+                adata=adata,
+                model=model,
+                bundle=bundle,
+                predicted_labels=result.predictions["predicted_cell_type"].values,
+            )
+            result.shap_global_df = shap_global
+            result.shap_group_df  = shap_group
+            result.shap_class_df  = shap_class
+            result.steps.append(StepStatus("SHAP", True, "Gene importance computed"))
+        except Exception as exc:
+            result.steps.append(StepStatus("SHAP", False, f"Warning: {exc}"))
+            # Non-fatal
+
+
+    # STEP 8 — Export (optional)
 
     if output_dir is not None:
         _log("Exporting results...")
@@ -475,6 +523,121 @@ def _export_distribution(result: PipelineResult, dest, dpi: int = 150) -> None:
     fig.savefig(dest, dpi=dpi, facecolor="#0d1117")
     plt.close(fig)
 
+
+
+# SHAP Analysis
+
+def _run_shap_analysis(adata, model, bundle, predicted_labels,
+                       background_size: int = 100,
+                       batch_size: int = 256):
+    """
+    Run SHAP LinearExplainer on the aligned, preprocessed AnnData.
+
+    Returns
+    -------
+    shap_global_df : pd.DataFrame   global gene importance (all classes averaged)
+    shap_group_df  : pd.DataFrame   gene importance per predicted cell type
+    shap_class_df  : pd.DataFrame   gene importance per model class
+    """
+    import shap as shap_lib
+    import scipy.sparse as sp
+
+    training_gene_order = list(bundle["training_gene_order"])
+    class_names         = list(bundle["class_names"])
+    raw_symbols         = bundle.get("gene_symbols")
+
+    # Resolve gene symbols
+    if raw_symbols is None:
+        gene_symbols = [None] * len(training_gene_order)
+    elif isinstance(raw_symbols, dict):
+        gene_symbols = [raw_symbols.get(g) for g in training_gene_order]
+    else:
+        gene_symbols = list(raw_symbols)
+
+    # Dense matrix
+    X = adata.X
+    if sp.issparse(X):
+        X = X.toarray()
+    X = np.asarray(X, dtype=np.float32)
+
+    # Background sample
+    rng = np.random.default_rng(42)
+    n = X.shape[0]
+    bg_idx = rng.choice(n, size=min(background_size, n), replace=False)
+    background = X[bg_idx]
+
+    # SHAP values in batches → shape: cells x genes x classes
+    explainer = shap_lib.LinearExplainer(model, background)
+
+    chunks = []
+    for start in range(0, n, batch_size):
+        batch = X[start:start + batch_size]
+        sv = explainer.shap_values(batch)
+        if isinstance(sv, list):
+            sv = np.stack(sv, axis=-1)
+        elif np.asarray(sv).ndim == 2:
+            sv = np.asarray(sv)[:, :, np.newaxis]
+        chunks.append(np.asarray(sv))
+    shap_values = np.concatenate(chunks, axis=0)  # (cells, genes, classes)
+
+    def _make_gene_label(symbol, ens_id):
+        if symbol is None or (isinstance(symbol, float) and np.isnan(symbol)) or str(symbol).strip() == "":
+            return str(ens_id)
+        return str(symbol)
+
+    # ── Global importance ──────────────────────────────────────────────────
+    global_importance = np.mean(np.abs(shap_values), axis=(0, 2))
+    shap_global_df = pd.DataFrame({
+        "ensembl_id":     training_gene_order,
+        "gene_symbol":    gene_symbols,
+        "gene_label":     [_make_gene_label(s, e) for s, e in zip(gene_symbols, training_gene_order)],
+        "mean_abs_shap":  global_importance,
+    }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+
+    # ── Class-specific importance ──────────────────────────────────────────
+    class_rows = []
+    for ci, cname in enumerate(class_names):
+        imp = np.mean(np.abs(shap_values[:, :, ci]), axis=0)
+        for gi, ens_id in enumerate(training_gene_order):
+            class_rows.append({
+                "class_name":    cname,
+                "ensembl_id":    ens_id,
+                "gene_symbol":   gene_symbols[gi],
+                "gene_label":    _make_gene_label(gene_symbols[gi], ens_id),
+                "mean_abs_shap": float(imp[gi]),
+            })
+    shap_class_df = (
+        pd.DataFrame(class_rows)
+        .sort_values(["class_name", "mean_abs_shap"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+
+    # ── Per-predicted-group importance ────────────────────────────────────
+    class_to_idx = {c: i for i, c in enumerate(class_names)}
+    group_rows = []
+    for group in sorted(pd.unique(predicted_labels)):
+        if group not in class_to_idx:
+            continue
+        ci   = class_to_idx[group]
+        mask = predicted_labels == group
+        sv_g = shap_values[mask, :, ci]
+        for gi, ens_id in enumerate(training_gene_order):
+            group_rows.append({
+                "predicted_group": group,
+                "ensembl_id":      ens_id,
+                "gene_symbol":     gene_symbols[gi],
+                "gene_label":      _make_gene_label(gene_symbols[gi], ens_id),
+                "mean_abs_shap":   float(np.mean(np.abs(sv_g[:, gi]))),
+                "mean_shap":       float(np.mean(sv_g[:, gi])),
+                "n_cells":         int(np.sum(mask)),
+            })
+    shap_group_df = (
+        pd.DataFrame(group_rows)
+        .sort_values(["predicted_group", "mean_abs_shap"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+
+    return shap_global_df, shap_group_df, shap_class_df
 
 
 # Fallback implementations (used when a module is not yet available)
