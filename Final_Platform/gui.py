@@ -667,6 +667,9 @@ with tab_predict:
                 st.session_state.run_complete      = True
                 st.session_state.n_cells           = result.n_cells
                 st.session_state.n_genes           = result.n_genes
+                st.session_state.shap_global_df = result.shap_global_df
+                st.session_state.shap_group_df = result.shap_group_df
+                st.session_state.shap_class_df = result.shap_class_df
                 st.rerun()
             else:
                 st.error(f"**Pipeline failed:** {result.error}")
