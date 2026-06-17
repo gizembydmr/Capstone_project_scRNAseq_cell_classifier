@@ -1,426 +1,700 @@
 """
-backend.py
-==========
-Integration layer between the GUI and all backend modules.
+pipeline.py
+===========
+Inference pipeline for the Cell Type Prediction Platform.
 
-The GUI imports exclusively from this module so that changes to individual
-backend files do not require touching gui.py.
+Orchestrates all analysis steps in order:
 
-Public API
-----------
-run_analysis(filepath, tissue, progress_callback) -> AnalysisResult
-    Full pipeline: load → validate → preprocess → predict → PCA/UMAP.
+    1. Load data          →  data_loader.py
+    2. Validate data      →  data_validation.py
+    3. Preprocess         →  preprocess_inference.py
+    4. Gene alignment     →  gene_alignment.py
+    5. Run prediction     →  model.py
+    6. PCA + UMAP         →  pca_umap.py
+    7. Export results     →  (export helpers below)
 
-run_dge(adata, group1, group2) -> DGEResult
-    Pairwise differential gene expression between two predicted cell types.
+Usage:
+    from pipeline import run_pipeline, PipelineResult
 
-get_pca_plot_bytes(pca_coords, labels, tissue) -> bytes
-    PCA scatter plot as PNG bytes (for st.image / st.download_button).
+    result = run_pipeline(
+        filepath="data/sample.h5ad",
+        tissue="pbmc",
+        output_dir="results/",          # optional
+        progress_callback=print,        # optional — receives status strings
+    )
 
-get_volcano_plot_bytes(dge_result) -> bytes
-    Volcano plot for a completed DGEResult as PNG bytes.
-
-Usage in gui.py
----------------
-    from backend import run_analysis, run_dge, get_pca_plot_bytes, AnalysisResult
-
-    # Replace inline pipeline block with:
-    result = run_analysis(tmp_path, tissue_key, progress_callback=status_text.markdown)
     if result.success:
-        st.session_state.predictions  = result.predictions
-        st.session_state.umap_coords  = result.umap_coords
-        st.session_state.pca_coords   = result.pca_coords
-        st.session_state.adata        = result.adata
-        st.session_state.run_complete = True
-
-    # DGE on demand:
-    dge = run_dge(result.adata, group1, group2)
-    if dge.success:
-        st.dataframe(dge.table)
-        st.download_button("Download volcano", dge.volcano_png, "volcano.png")
+        print(result.predictions)       # pd.DataFrame: cell_barcode | predicted_cell_type
+        print(result.umap_coords)       # np.ndarray  : (n_cells, 2)
+    else:
+        print(result.error)
 """
 
 from __future__ import annotations
 
 import io
+import importlib
+import sys
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 
-from pipeline import run_pipeline, PipelineResult, StepStatus, CELL_PALETTE
+
+# Module import helper
+
+def _import(module_name: str):
+    """
+    Import a sibling module by name.
+
+    Returns None only when the module file does not exist.
+    Re-raises any other import error so real bugs are not silently swallowed.
+    """
+    here = Path(__file__).parent
+    if str(here) not in sys.path:
+        sys.path.insert(0, str(here))
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if module_name in str(exc):
+            return None   # module file not present yet
+        raise             # a dependency of the module is missing — surface the error
+
 
 # Result types
 
 @dataclass
-class DGEResult:
-    """Result of a pairwise DGE analysis between two predicted cell types."""
-
-    group1: str
-    group2: str
-    table: Optional[pd.DataFrame] = None    # gene | logfoldchange | pval_adj | score
-    volcano_png: Optional[bytes] = None     # PNG bytes for st.download_button
-    error: str = ""
-
-    @property
-    def success(self) -> bool:
-        return self.table is not None and not self.error
+class StepStatus:
+    name: str
+    success: bool
+    message: str = ""
 
 
 @dataclass
-class AnalysisResult:
-    """
-    Complete result returned to the GUI by run_analysis().
-
-    Fields mirror PipelineResult so the GUI can access everything it needs
-    from a single object without importing pipeline.py directly.
-    """
+class PipelineResult:
+    """Full result object returned by run_pipeline()."""
 
     success: bool = False
     error: str = ""
     steps: List[StepStatus] = field(default_factory=list)
 
-    predictions: Optional[pd.DataFrame] = None      # cell_barcode | predicted_cell_type
-    probabilities: Optional[pd.DataFrame] = None    # per-class probability scores
-    umap_coords: Optional[np.ndarray] = None        # (n_cells, 2)
-    pca_coords: Optional[np.ndarray] = None         # (n_cells, n_pcs)
-    pca_variance_ratio: Optional[np.ndarray] = None # explained variance per PC
+    predictions: Optional[pd.DataFrame] = None    # cell_barcode | predicted_cell_type
+    probabilities: Optional[pd.DataFrame] = None  # per-class probability scores
+    umap_coords: Optional[np.ndarray] = None       # (n_cells, 2)
+    pca_coords: Optional[np.ndarray] = None        # (n_cells, n_pcs)
+    pca_variance_ratio: Optional[np.ndarray] = None  # explained variance per PC
 
     shap_global_df: Optional[pd.DataFrame] = None   # global gene importance
     shap_group_df: Optional[pd.DataFrame] = None    # per predicted group importance
     shap_class_df: Optional[pd.DataFrame] = None    # per class importance
 
-    adata: Optional[object] = None                  # preprocessed AnnData
+    adata: Optional[object] = None                 # preprocessed AnnData
     n_cells: int = 0
     n_genes: int = 0
     tissue: str = ""
 
-    @classmethod
-    def from_pipeline(cls, pr: PipelineResult) -> "AnalysisResult":
-        return cls(
-            success=pr.success,
-            error=pr.error,
-            steps=pr.steps,
-            predictions=pr.predictions,
-            probabilities=pr.probabilities,
-            umap_coords=pr.umap_coords,
-            pca_coords=pr.pca_coords,
-            pca_variance_ratio=pr.pca_variance_ratio,
-            shap_global_df=pr.shap_global_df,
-            shap_group_df=pr.shap_group_df,
-            shap_class_df=pr.shap_class_df,
-            adata=pr.adata,
-            n_cells=pr.n_cells,
-            n_genes=pr.n_genes,
-            tissue=pr.tissue,
-        )
+    exported_files: Dict[str, Path] = field(default_factory=dict)
 
-    def cell_types(self) -> List[str]:
-        """Sorted list of unique predicted cell types."""
-        if self.predictions is None:
-            return []
-        return sorted(self.predictions["predicted_cell_type"].unique().tolist())
+    def summary(self) -> str:
+        lines = []
+        icon = "OK" if self.success else "FAIL"
+        lines.append(f"[{icon}] Pipeline {'succeeded' if self.success else 'failed'}")
+        for s in self.steps:
+            step_icon = "+" if s.success else "-"
+            lines.append(f"  [{step_icon}] {s.name}: {s.message}")
+        if not self.success:
+            lines.append(f"\n  Error: {self.error}")
+        return "\n".join(lines)
 
 
-# Public API
+# Main entry point
 
-def run_analysis(
+
+def run_pipeline(
     filepath: str | Path,
     tissue: str,
+    output_dir: Optional[str | Path] = None,
     progress_callback: Optional[Callable[[str], None]] = None,
     min_counts: int = 500,
     min_genes: int = 200,
     run_shap: bool = True,
-) -> AnalysisResult:
+) -> PipelineResult:
     """
-    Run the full cell-type prediction pipeline.
-
-    This replaces the inline preprocessing/prediction block in gui.py.
-    All backend steps (load, validate, preprocess, align, predict, PCA/UMAP)
-    are handled by pipeline.py; this function wraps the result for the GUI.
+    Execute the full cell-type prediction pipeline.
 
     Parameters
     ----------
     filepath : str or Path
         Path to the uploaded scRNA-seq file (.h5ad, .csv, .mtx).
     tissue : str
-        Tissue key: "pbmc" | "lung" | "liver" | "brain".
+        Tissue key, e.g. "pbmc", "lung", "liver", "brain".
+    output_dir : str or Path, optional
+        If provided, results (CSV + plots) are exported here.
     progress_callback : callable, optional
-        Receives status strings — pass ``st.empty().markdown`` for live updates.
+        Called with a status string at each step.
 
     Returns
     -------
-    AnalysisResult
+    PipelineResult
     """
-    pr = run_pipeline(
-        filepath=filepath,
-        tissue=tissue,
-        progress_callback=progress_callback,
-        min_counts=min_counts,
-        min_genes=min_genes,
-        run_shap=run_shap,
-    )
-    return AnalysisResult.from_pipeline(pr)
+    result = PipelineResult(tissue=tissue)
+    filepath = Path(filepath)
 
+    def _log(msg: str) -> None:
+        if progress_callback:
+            progress_callback(msg)
 
-def run_dge(adata, group1: str, group2: str) -> DGEResult:
-    """
-    Run pairwise differential gene expression between two predicted cell types.
-
-    Calls dge.run_pairwise_dge() and returns results + a volcano plot as bytes.
-    Requires 'predicted_cell_type' to be present in adata.obs (set by the pipeline).
-
-    Parameters
-    ----------
-    adata : anndata.AnnData
-        Preprocessed AnnData with 'predicted_cell_type' in .obs.
-    group1, group2 : str
-        Cell type labels to compare (must be present in predictions).
-
-    Returns
-    -------
-    DGEResult
-        .success      True if analysis completed without error
-        .table        pd.DataFrame with gene, logfoldchange, pval_adj, score
-        .volcano_png  PNG bytes of volcano plot
-        .error        Human-readable error message on failure
-    """
-    result = DGEResult(group1=group1, group2=group2)
-
-    if adata is None:
-        result.error = "No AnnData available. Run analysis first."
-        return result
-
-    if "predicted_cell_type" not in adata.obs.columns:
-        result.error = (
-            "Column 'predicted_cell_type' not found in adata.obs. "
-            "Run the prediction pipeline before DGE."
-        )
-        return result
-
-    available = adata.obs["predicted_cell_type"].unique().tolist()
-    for label in (group1, group2):
-        if label not in available:
-            result.error = f"'{label}' not found in predicted cell types: {available[:8]}"
-            return result
-
+    # Load model bundle (used in Steps 3, 4, 5)
     try:
-        from dge import run_pairwise_dge, volcano_plot
-    except ImportError:
-        result.error = "dge.py not found in project directory."
+        import joblib
+        bundle_path = Path(__file__).parent / "models" / "LR_level1_no_weight_final_model_bundle.joblib"
+        bundle = joblib.load(bundle_path)
+    except Exception as exc:
+        result.error = f"Could not load model bundle: {exc}"
         return result
 
+    # STEP 1 — Load data
+    _log("Loading dataset...")
     try:
-        mask = adata.obs["predicted_cell_type"].isin([group1, group2])
-        adata_subset = adata[mask]
+        loader = _import("data_loader")
+        if loader is None:
+            raise ImportError("data_loader.py not found in project directory.")
 
-        df = run_pairwise_dge(
-            adata_subset,
-            "predicted_cell_type",
-            group1,
-            group2
-        )
+        load_res = loader.load_file(filepath)
+        if not load_res.success:
+            raise ValueError(load_res.error)
 
-        result.table = df
-
-        plot_path = volcano_plot(
-            df,
-            group1,
-            group2,
-            "predicted_cell_type"
-        )
-
-        with open(plot_path, "rb") as f:
-            result.volcano_png = f.read()
+        adata = load_res.adata
+        result.n_cells = load_res.n_cells
+        result.n_genes = load_res.n_genes
+        result.steps.append(StepStatus(
+            "Load", True,
+            f"{load_res.n_cells:,} cells x {load_res.n_genes:,} genes [{load_res.file_format}]",
+        ))
 
     except Exception as exc:
-        result.error = str(exc)
+        result.steps.append(StepStatus("Load", False, str(exc)))
+        result.error = f"Data loading failed: {exc}"
+        return result
+
+    # STEP 2 — Validate data
+
+    _log("Validating data...")
+    try:
+        validator = _import("data_validation")
+        if validator is None:
+            raise ImportError("data_validation.py not found in project directory.")
+
+        val_res = validator.validate_adata(adata)
+        if not val_res.is_valid:
+            raise ValueError("\n".join(val_res.errors))
+
+        warn_note = f" | {len(val_res.warnings)} warning(s)" if val_res.warnings else ""
+        result.steps.append(StepStatus("Validate", True, f"All checks passed{warn_note}"))
+
+    except Exception as exc:
+        result.steps.append(StepStatus("Validate", False, str(exc)))
+        result.error = f"Validation failed: {exc}"
+        return result
+
+
+    # STEP 3 — Preprocess
+
+    _log("Preprocessing...")
+    try:
+        preprocessing_params = bundle["preprocessing"]
+
+        preprocess = _import("preprocess_inference")
+        if preprocess is not None and hasattr(preprocess, "preprocess_for_inference"):
+            adata = preprocess.preprocess_for_inference(
+                adata,
+                target_sum=preprocessing_params["target_sum"],
+                min_counts=min_counts,
+                min_genes=min_genes,
+            )
+            result.steps.append(StepStatus("Preprocess", True, "Normalisation + HVG selection done"))
+        else:
+            adata = _fallback_preprocess(adata)
+            result.steps.append(StepStatus(
+                "Preprocess", True,
+                "preprocess_inference.py not available — used built-in fallback",
+            ))
+    except IndexError as exc:
+        if "Positions outside range" in str(exc):
+            msg = (
+                f"Dataset has too few genes ({adata.n_vars}) for QC metrics. "
+                f"scanpy requires at least 500 genes. Add more genes to the input file."
+            )
+        else:
+            msg = str(exc)
+        result.steps.append(StepStatus("Preprocess", False, msg))
+        result.error = f"Preprocessing failed: {msg}"
+        return result
+    except Exception as exc:
+        result.steps.append(StepStatus("Preprocess", False, str(exc)))
+        result.error = f"Preprocessing failed: {exc}"
+        return result
+
+
+    # STEP 4 — Gene alignment
+
+    _log("Aligning genes to model reference...")
+    try:
+        gene_align = _import("gene_alignment")
+        if gene_align is not None and hasattr(gene_align, "align_genes_to_training"):
+            training_gene_order = bundle["training_gene_order"]
+            adata = gene_align.align_genes_to_training(adata, training_gene_order)
+            result.steps.append(StepStatus(
+                "Gene Alignment", True,
+                f"Aligned to model reference ({len(training_gene_order)} genes)",
+            ))
+        else:
+            result.steps.append(StepStatus(
+                "Gene Alignment", True,
+                "gene_alignment.py not available — genes used as-is",
+            ))
+    except Exception as exc:
+        result.steps.append(StepStatus(
+            "Gene Alignment", False, f"Warning: {exc} — continuing with available genes"
+        ))
+
+
+    # STEP 5 — Prediction
+
+    _log("Running cell-type prediction...")
+    try:
+        import scipy.sparse as sp
+
+        model = bundle["model"]
+        label_encoder = bundle["label_encoder"]
+        class_names = bundle["class_names"]
+
+        if not hasattr(model, "multi_class"):
+            model.multi_class = "auto"
+
+        X = adata.X
+        if sp.issparse(X):
+            X = X.toarray()
+
+        predicted_encoded = model.predict(X)
+        predicted_labels = label_encoder.inverse_transform(predicted_encoded)
+
+        proba = model.predict_proba(X)
+        result.probabilities = pd.DataFrame(proba, columns=class_names)
+
+        step_msg = f"{len(pd.Series(predicted_labels).unique())} cell types predicted"
+
+        result.predictions = pd.DataFrame({
+            "cell_barcode": adata.obs_names.tolist(),
+            "predicted_cell_type": predicted_labels,
+        })
+        adata.obs["predicted_cell_type"] = predicted_labels
+        result.steps.append(StepStatus("Predict", True, step_msg))
+
+    except Exception as exc:
+        result.steps.append(StepStatus("Predict", False, str(exc)))
+        result.error = f"Prediction failed: {exc}"
+        return result
+
+
+    # STEP 6 — PCA + UMAP
+
+    _log("Computing PCA and UMAP...")
+    try:
+        pca_umap_mod = _import("pca_umap")
+        if pca_umap_mod is not None and hasattr(pca_umap_mod, "run_pca_umap"):
+            adata = pca_umap_mod.run_pca_umap(adata)
+            result.pca_coords = adata.obsm.get("X_pca")
+            result.umap_coords = adata.obsm.get("X_umap")
+            result.steps.append(StepStatus("PCA + UMAP", True, "Embeddings computed"))
+        else:
+            result.pca_coords, result.umap_coords = _fallback_pca_umap(adata)
+            result.steps.append(StepStatus(
+                "PCA + UMAP", True, "pca_umap.py not available — used built-in fallback"
+            ))
+
+        result.pca_variance_ratio = adata.uns.get("pca", {}).get("variance_ratio", None)
+    except Exception as exc:
+        result.steps.append(StepStatus("PCA + UMAP", False, f"Warning: {exc}"))
+        # Non-fatal: predictions are still valid without UMAP
+
+    result.adata = adata
+    result.n_cells = adata.n_obs
+    result.n_genes = adata.n_vars
+
+
+    # STEP 7 — SHAP Analysis (optional)
+
+    if run_shap:
+        _log("Running SHAP analysis...")
+        try:
+            shap_global, shap_group, shap_class = _run_shap_analysis(
+                adata=adata,
+                model=model,
+                bundle=bundle,
+                predicted_labels=result.predictions["predicted_cell_type"].values,
+            )
+            result.shap_global_df = shap_global
+            result.shap_group_df  = shap_group
+            result.shap_class_df  = shap_class
+            result.steps.append(StepStatus("SHAP", True, "Gene importance computed"))
+        except Exception as exc:
+            result.steps.append(StepStatus("SHAP", False, f"Warning: {exc}"))
+            # Non-fatal
+
+
+    # STEP 8 — Export (optional)
+
+    if output_dir is not None:
+        _log("Exporting results...")
+        try:
+            exported = export_results(result, output_dir)
+            result.exported_files = exported
+            result.steps.append(StepStatus(
+                "Export", True,
+                f"{len(exported)} file(s) written to '{output_dir}'",
+            ))
+        except Exception as exc:
+            result.steps.append(StepStatus("Export", False, str(exc)))
+
+    result.success = True
+    _log("Pipeline complete.")
     return result
 
+# Export helpers
 
-def get_pca_plot_bytes(
-    pca_coords: np.ndarray,
-    labels: np.ndarray,
-    tissue: str,
-    dpi: int = 150,
-) -> bytes:
+def export_results(result: PipelineResult, output_dir: str | Path) -> Dict[str, Path]:
     """
-    Render a PCA scatter plot (PC1 vs PC2) and return PNG bytes.
+    Export predictions and plots to disk.
 
-    Intended for st.image() display and st.download_button() export in gui.py.
-
-    Parameters
-    ----------
-    pca_coords : np.ndarray  shape (n_cells, n_pcs)
-    labels : np.ndarray      predicted cell type label per cell
-    tissue : str             used in plot title
-    dpi : int                image resolution
+    Writes:
+        predictions.csv          — cell barcode + predicted cell type
+        umap_plot.png            — UMAP scatter coloured by cell type
+        cell_type_distribution.png — horizontal bar chart of cell type counts
 
     Returns
     -------
-    bytes  PNG image
+    dict mapping filename key -> Path of written file
     """
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    exported: Dict[str, Path] = {}
+
+    if result.predictions is not None:
+        df = result.predictions.copy()
+        if result.probabilities is not None:
+            df = df.join(result.probabilities.set_index(df.index), how="left")
+        csv_path = out / "predictions.csv"
+        df.to_csv(csv_path, index=False)
+        exported["predictions_csv"] = csv_path
+
+    if result.umap_coords is not None and result.predictions is not None:
+        umap_path = out / "umap_plot.png"
+        _export_umap(result, umap_path)
+        exported["umap_plot"] = umap_path
+
+    if result.predictions is not None:
+        dist_path = out / "cell_type_distribution.png"
+        _export_distribution(result, dist_path)
+        exported["cell_type_distribution"] = dist_path
+
+    return exported
+
+
+def export_predictions_csv(result: PipelineResult) -> bytes:
+    """Return predictions as CSV bytes (for Streamlit st.download_button)."""
+    if result.predictions is None:
+        return b""
+    df = result.predictions.copy()
+    if result.probabilities is not None:
+        df = df.join(result.probabilities.reset_index(drop=True), how="left")
+    return df.to_csv(index=False).encode("utf-8")
+
+
+def export_umap_png(result: PipelineResult, dpi: int = 150) -> bytes:
+    """Return UMAP plot as PNG bytes (for Streamlit st.download_button)."""
+    buf = io.BytesIO()
+    _export_umap(result, buf, dpi=dpi)
+    buf.seek(0)
+    return buf.read()
+
+
+
+# Plot helpers
+
+
+CELL_PALETTE = [
+    "#58a6ff", "#3fb950", "#f78166", "#e3b341",
+    "#bc8cff", "#ff7b72", "#79c0ff", "#ffa657",
+    "#56d364", "#f0883e", "#a5d6ff", "#d2a8ff",
+]
+
+
+def _export_umap(result: PipelineResult, dest, dpi: int = 150) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
+    coords = result.umap_coords
+    labels = result.predictions["predicted_cell_type"].values
     unique_types = list(pd.Series(labels).value_counts().index)
     color_map = {ct: CELL_PALETTE[i % len(CELL_PALETTE)] for i, ct in enumerate(unique_types)}
 
-    fig, ax = plt.subplots(figsize=(7, 5.5))
+    fig, ax = plt.subplots(figsize=(8, 6))
     fig.patch.set_facecolor("#0d1117")
     ax.set_facecolor("#0d1117")
 
     for ct in unique_types:
         mask = labels == ct
         ax.scatter(
-            pca_coords[mask, 0],
-            pca_coords[mask, 1],
-            c=color_map[ct],
-            s=8 if len(labels) > 2000 else 18,
-            alpha=0.75,
-            linewidths=0,
-            label=ct,
-            rasterized=True,
+            coords[mask, 0], coords[mask, 1],
+            c=color_map[ct], s=10, alpha=0.75,
+            linewidths=0, label=ct, rasterized=True,
         )
 
     legend = ax.legend(fontsize=8, markerscale=2, frameon=True,
                        framealpha=0.15, edgecolor="#30363d", labelcolor="#e6edf3")
     legend.get_frame().set_facecolor("#161b22")
-    ax.set_xlabel("PC 1", fontsize=10, color="#8b949e")
-    ax.set_ylabel("PC 2", fontsize=10, color="#8b949e")
+    ax.set_xlabel("UMAP 1", fontsize=10, color="#8b949e")
+    ax.set_ylabel("UMAP 2", fontsize=10, color="#8b949e")
     ax.tick_params(colors="#8b949e", labelsize=8)
     ax.spines[:].set_color("#21262d")
-    ax.set_title(f"PCA · {tissue.upper()}", fontsize=11, color="#e6edf3", pad=10)
+    ax.set_title(f"UMAP - {result.tissue.upper()}", fontsize=12, color="#e6edf3", pad=10)
     plt.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, facecolor="#0d1117")
+    fig.savefig(dest, dpi=dpi, facecolor="#0d1117")
     plt.close(fig)
-    buf.seek(0)
-    return buf.read()
 
 
-def get_shap_bar_plot_bytes(
-    df: pd.DataFrame,
-    title: str,
-    top_n: int = 20,
-    dpi: int = 150,
-) -> bytes:
-    """
-    Render a horizontal bar chart of SHAP gene importance and return PNG bytes.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Must contain columns 'gene_label' and 'mean_abs_shap'.
-    title : str
-        Plot title.
-    top_n : int
-        Number of top genes to show.
-    """
+def _export_distribution(result: PipelineResult, dest, dpi: int = 150) -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    top = df.head(top_n).iloc[::-1].copy()
+    counts = result.predictions["predicted_cell_type"].value_counts()
+    labels = counts.index.tolist()
+    values = counts.values.tolist()
+    colors = [CELL_PALETTE[i % len(CELL_PALETTE)] for i in range(len(labels))]
 
-    fig, ax = plt.subplots(figsize=(8, max(4, top_n * 0.38)))
+    fig, ax = plt.subplots(figsize=(8, max(3, len(labels) * 0.55)))
     fig.patch.set_facecolor("#0d1117")
     ax.set_facecolor("#161b22")
 
-    ax.barh(top["gene_label"], top["mean_abs_shap"],
-            color="#58a6ff", height=0.65, edgecolor="none")
+    bars = ax.barh(labels[::-1], values[::-1], color=colors[::-1], height=0.6, edgecolor="none")
+    for bar, cnt in zip(bars, values[::-1]):
+        ax.text(
+            bar.get_width() + max(values) * 0.01,
+            bar.get_y() + bar.get_height() / 2,
+            str(cnt), va="center", ha="left",
+            fontsize=9, color="#8b949e", fontfamily="monospace",
+        )
 
-    ax.set_xlabel("Mean |SHAP value|", fontsize=10, color="#8b949e", labelpad=8)
+    ax.set_xlabel("Number of Cells", fontsize=10, color="#8b949e", labelpad=8)
     ax.tick_params(colors="#8b949e", labelsize=9)
     ax.spines[:].set_visible(False)
-    ax.set_title(title, fontsize=12, color="#e6edf3", pad=10)
+    ax.set_xlim(0, max(values) * 1.15)
+    ax.set_title("Cell Type Distribution", fontsize=12, color="#e6edf3", pad=10)
     plt.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, facecolor="#0d1117")
+    fig.savefig(dest, dpi=dpi, facecolor="#0d1117")
     plt.close(fig)
-    buf.seek(0)
-    return buf.read()
 
 
-def get_volcano_plot_bytes(dge_result: DGEResult, dpi: int = 150) -> Optional[bytes]:
-    """Return the cached volcano plot bytes from a DGEResult, or None."""
-    return dge_result.volcano_png if dge_result.success else None
 
+# SHAP Analysis
 
-def get_pca_variance_plot_bytes(
-    variance_ratio: np.ndarray,
-    cumulative: bool = False,
-    dpi: int = 150,
-) -> bytes:
+def _run_shap_analysis(adata, model, bundle, predicted_labels,
+                       background_size: int = 100,
+                       batch_size: int = 256):
     """
-    Render a PCA explained variance plot and return PNG bytes.
-
-    Parameters
-    ----------
-    variance_ratio : np.ndarray
-        Per-PC explained variance ratios from adata.uns["pca"]["variance_ratio"].
-    cumulative : bool
-        If True, plot cumulative explained variance instead of per-PC.
-    dpi : int
-        Image resolution.
+    Run SHAP LinearExplainer on the aligned, preprocessed AnnData.
 
     Returns
     -------
-    bytes  PNG image
+    shap_global_df : pd.DataFrame   global gene importance (all classes averaged)
+    shap_group_df  : pd.DataFrame   gene importance per predicted cell type
+    shap_class_df  : pd.DataFrame   gene importance per model class
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    import shap as shap_lib
+    import scipy.sparse as sp
 
-    n_pcs = len(variance_ratio)
-    x = list(range(1, n_pcs + 1))
+    training_gene_order = list(bundle["training_gene_order"])
+    class_names         = list(bundle["class_names"])
+    raw_symbols         = bundle.get("gene_symbols")
 
-    if cumulative:
-        y = np.cumsum(variance_ratio)
-        ylabel = "Cumulative Explained Variance"
-        title = "PCA · Cumulative Explained Variance"
-        color = "#3fb950"
+    # Resolve gene symbols
+    if raw_symbols is None:
+        gene_symbols = [None] * len(training_gene_order)
+    elif isinstance(raw_symbols, dict):
+        gene_symbols = [raw_symbols.get(g) for g in training_gene_order]
     else:
-        y = variance_ratio
-        ylabel = "Explained Variance Ratio"
-        title = "PCA · Explained Variance per Component"
-        color = "#58a6ff"
+        gene_symbols = list(raw_symbols)
 
-    fig, ax = plt.subplots(figsize=(7, 4.5))
-    fig.patch.set_facecolor("#0d1117")
-    ax.set_facecolor("#161b22")
+    # Dense matrix
+    X = adata.X
+    if sp.issparse(X):
+        X = X.toarray()
+    X = np.asarray(X, dtype=np.float32)
 
-    ax.plot(x, y, color=color, linewidth=1.8, marker="o",
-            markersize=3.5, markerfacecolor=color, markeredgewidth=0)
+    # Background sample
+    rng = np.random.default_rng(42)
+    n = X.shape[0]
+    bg_idx = rng.choice(n, size=min(background_size, n), replace=False)
+    background = X[bg_idx]
 
-    if cumulative:
-        for threshold in (0.80, 0.90, 0.95):
-            idx = next((i for i, v in enumerate(y) if v >= threshold), None)
-            if idx is not None:
-                ax.axhline(threshold, linestyle="--", linewidth=0.7, color="#8b949e")
-                ax.text(n_pcs * 0.98, threshold + 0.005,
-                        f"{int(threshold * 100)}%",
-                        fontsize=7, color="#8b949e", ha="right")
+    # SHAP values in batches → shape: cells x genes x classes
+    explainer = shap_lib.LinearExplainer(model, background)
 
-    ax.set_xlabel("Principal Component", fontsize=10, color="#8b949e")
-    ax.set_ylabel(ylabel, fontsize=10, color="#8b949e")
-    ax.set_title(title, fontsize=11, color="#e6edf3", pad=10)
-    ax.tick_params(colors="#8b949e", labelsize=8)
-    ax.spines[:].set_color("#21262d")
-    ax.set_xlim(0, n_pcs + 1)
-    plt.tight_layout()
+    chunks = []
+    for start in range(0, n, batch_size):
+        batch = X[start:start + batch_size]
+        sv = explainer.shap_values(batch)
+        if isinstance(sv, list):
+            sv = np.stack(sv, axis=-1)
+        elif np.asarray(sv).ndim == 2:
+            sv = np.asarray(sv)[:, :, np.newaxis]
+        chunks.append(np.asarray(sv))
+    shap_values = np.concatenate(chunks, axis=0)  # (cells, genes, classes)
 
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=dpi, facecolor="#0d1117")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+    def _make_gene_label(symbol, ens_id):
+        if symbol is None or (isinstance(symbol, float) and np.isnan(symbol)) or str(symbol).strip() == "":
+            return str(ens_id)
+        return str(symbol)
+
+    # ── Global importance ──────────────────────────────────────────────────
+    global_importance = np.mean(np.abs(shap_values), axis=(0, 2))
+    shap_global_df = pd.DataFrame({
+        "ensembl_id":     training_gene_order,
+        "gene_symbol":    gene_symbols,
+        "gene_label":     [_make_gene_label(s, e) for s, e in zip(gene_symbols, training_gene_order)],
+        "mean_abs_shap":  global_importance,
+    }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+
+    # ── Class-specific importance ──────────────────────────────────────────
+    class_rows = []
+    for ci, cname in enumerate(class_names):
+        imp = np.mean(np.abs(shap_values[:, :, ci]), axis=0)
+        for gi, ens_id in enumerate(training_gene_order):
+            class_rows.append({
+                "class_name":    cname,
+                "ensembl_id":    ens_id,
+                "gene_symbol":   gene_symbols[gi],
+                "gene_label":    _make_gene_label(gene_symbols[gi], ens_id),
+                "mean_abs_shap": float(imp[gi]),
+            })
+    shap_class_df = (
+        pd.DataFrame(class_rows)
+        .sort_values(["class_name", "mean_abs_shap"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+
+    # ── Per-predicted-group importance ────────────────────────────────────
+    class_to_idx = {c: i for i, c in enumerate(class_names)}
+    group_rows = []
+    for group in sorted(pd.unique(predicted_labels)):
+        if group not in class_to_idx:
+            continue
+        ci   = class_to_idx[group]
+        mask = predicted_labels == group
+        sv_g = shap_values[mask, :, ci]
+        for gi, ens_id in enumerate(training_gene_order):
+            group_rows.append({
+                "predicted_group": group,
+                "ensembl_id":      ens_id,
+                "gene_symbol":     gene_symbols[gi],
+                "gene_label":      _make_gene_label(gene_symbols[gi], ens_id),
+                "mean_abs_shap":   float(np.mean(np.abs(sv_g[:, gi]))),
+                "mean_shap":       float(np.mean(sv_g[:, gi])),
+                "n_cells":         int(np.sum(mask)),
+            })
+    shap_group_df = (
+        pd.DataFrame(group_rows)
+        .sort_values(["predicted_group", "mean_abs_shap"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+
+    return shap_global_df, shap_group_df, shap_class_df
+
+
+# Fallback implementations (used when a module is not yet available)
+
+
+_TISSUE_CELL_TYPES: Dict[str, List[str]] = {
+    "pbmc":  ["B cells", "T cells (CD4+)", "T cells (CD8+)", "NK cells",
+              "Monocytes (Classical)", "Monocytes (Non-Classical)", "Dendritic Cells"],
+    "lung":  ["AT1 cells", "AT2 cells", "Club cells", "Ciliated cells",
+              "Endothelial cells", "Fibroblasts", "Macrophages", "T cells"],
+    "liver": ["Hepatocytes", "Cholangiocytes", "Kupffer cells",
+              "Hepatic Stellate cells", "Endothelial cells", "NK cells"],
+    "brain": ["Neurons (Excitatory)", "Neurons (Inhibitory)", "Astrocytes",
+              "Oligodendrocytes", "OPC", "Microglia", "Endothelial cells"],
+}
+
+
+def _fallback_preprocess(adata):
+    """Basic scanpy preprocessing fallback."""
+    try:
+        import scanpy as sc
+        import scipy.sparse as sp
+
+        if not sp.issparse(adata.X):
+            adata.X = sp.csr_matrix(adata.X)
+
+        sc.pp.filter_cells(adata, min_genes=5)
+        sc.pp.filter_genes(adata, min_cells=3)
+        sc.pp.normalize_total(adata, target_sum=1e4)
+        sc.pp.log1p(adata)
+        n_hvg = min(2000, adata.n_vars)
+        sc.pp.highly_variable_genes(adata, n_top_genes=n_hvg, flavor="seurat")
+    except Exception:
+        pass
+    return adata
+
+
+def _fallback_predict(adata, tissue: str) -> np.ndarray:
+    """Demo predictions — replaced once model.py is ready."""
+    cell_types = _TISSUE_CELL_TYPES.get(tissue.lower(), ["Unknown"])
+    rng = np.random.default_rng(42)
+    weights = rng.dirichlet(np.ones(len(cell_types)))
+    return rng.choice(cell_types, size=adata.n_obs, p=weights)
+
+
+def _fallback_pca_umap(adata):
+    """Basic scanpy PCA + UMAP fallback."""
+    pca_coords = None
+    umap_coords = None
+    try:
+        import scanpy as sc
+
+        n_pcs = min(50, adata.n_obs - 1, adata.n_vars - 1)
+        sc.tl.pca(adata, n_comps=max(2, n_pcs), use_highly_variable=True)
+        pca_coords = adata.obsm.get("X_pca")
+
+        sc.pp.neighbors(adata, n_pcs=min(30, pca_coords.shape[1] if pca_coords is not None else 10))
+        sc.tl.umap(adata)
+        umap_coords = adata.obsm.get("X_umap")
+    except Exception:
+        rng = np.random.default_rng(0)
+        umap_coords = rng.standard_normal((adata.n_obs, 2))
+
+    return pca_coords, umap_coords
 
 
 
+# CLI:  python pipeline.py <file> <tissue> [output_dir]
 
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Usage: python pipeline.py <filepath> <tissue> [output_dir]")
+        print("       tissue: pbmc | lung | liver | brain")
+        sys.exit(1)
+
+    fp = sys.argv[1]
+    ts = sys.argv[2]
+    od = sys.argv[3] if len(sys.argv) > 3 else None
+
+    res = run_pipeline(fp, ts, output_dir=od, progress_callback=print)
+    print(res.summary())
+    sys.exit(0 if res.success else 1)
