@@ -148,9 +148,14 @@ def run_pipeline(
             progress_callback(msg)
 
     # Load model bundle (used in Steps 3, 4, 5)
+    _TISSUE_BUNDLE_MAP = {
+        "pbmc":     "LR_level3_no_weight_final_model_bundle.joblib",
+        "pancreas": "pancreas_LR_balanced_level3_final_model_bundle.joblib",
+    }
     try:
         import joblib
-        bundle_path = Path(__file__).parent / "models" / "LR_level1_no_weight_final_model_bundle.joblib"
+        bundle_filename = _TISSUE_BUNDLE_MAP.get(tissue, "LR_level3_no_weight_final_model_bundle.joblib")
+        bundle_path = Path(__file__).parent / "models" / bundle_filename
         bundle = joblib.load(bundle_path)
     except Exception as exc:
         result.error = f"Could not load model bundle: {exc}"
