@@ -278,10 +278,20 @@ html, body, [class*="css"] {
 TISSUE_MODELS: dict[str, dict] = {
     "PBMC (Peripheral Blood Mononuclear Cells)": {
         "key": "pbmc",
-        "cell_types": ["B cells", "T cells (CD4+)", "T cells (CD8+)", "NK cells",
-                        "Monocytes (Classical)", "Monocytes (Non-Classical)",
-                        "Dendritic Cells", "Platelets"],
-        "model_file": "models/pbmc_model.pkl",
+        "cell_types": [
+        "B cell",
+        "CD34+ cell",
+        "Dendritic cell",
+        "Monocyte",
+        "NK cell",
+        "Regulatory T cell",
+        "CD4 memory T cell",
+        "CD4 naive T cell",
+        "CD4 helper T cell",
+        "CD8 naive T cell",
+        "CD8 cytotoxic T cell",
+    ],
+        "model_file": "models/pbmc/LR_level3_no_weight_final_model_bundle_with_unassigned_threshold_050.joblib",
         "description": "Pre-trained on 10x Genomics PBMC 3k & 68k datasets.",
         "available": True,
     },
@@ -293,7 +303,7 @@ TISSUE_MODELS: dict[str, dict] = {
                         "Pancreatic A cells (Alpha)", "Pancreatic Acinar cells",
                         "Pancreatic Ductal cells", "Pancreatic Stellate cells",
                         "Type B Pancreatic cells (Beta)"],
-        "model_file": "models/pancreas_LR_balanced_level3_final_model_bundle.joblib",
+        "model_file": "models/pancreas/pancreas_LR_balanced_level3_final_model_bundle_with_unassigned_threshold_085.joblib",
         "description": "Pre-trained on human pancreas scRNA-seq reference data.",
         "available": True,
     },
@@ -331,6 +341,49 @@ CELL_PALETTE = [
     "#56d364", "#f0883e", "#a5d6ff", "#d2a8ff",
 ]
 
+def get_unassigned_threshold(model_info: dict) -> float | None:
+    model_path = Path(__file__).parent / model_info["model_file"]
+
+    if not JOBLIB_OK or not model_path.exists():
+        return None
+
+    try:
+        model_bundle = joblib.load(model_path)
+    except Exception:
+        return None
+
+    possible_keys = [
+        "unassigned_threshold",
+        "confidence_threshold",
+        "threshold",
+    ]
+
+    for key in possible_keys:
+        if key in model_bundle:
+            try:
+                return float(model_bundle[key])
+            except (TypeError, ValueError):
+                pass
+
+    preprocessing = model_bundle.get("preprocessing", {})
+    if isinstance(preprocessing, dict):
+        for key in possible_keys:
+            if key in preprocessing:
+                try:
+                    return float(preprocessing[key])
+                except (TypeError, ValueError):
+                    pass
+
+    metadata = model_bundle.get("metadata", {})
+    if isinstance(metadata, dict):
+        for key in possible_keys:
+            if key in metadata:
+                try:
+                    return float(metadata[key])
+                except (TypeError, ValueError):
+                    pass
+
+    return None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Session state initialisation
@@ -398,9 +451,9 @@ with tab_model_info:
     # Each tissue's model bundle has a matching metadata JSON sitting next to
     # it. Add new tissues here as their metadata files become available.
     TISSUE_METADATA_PATHS: dict[str, str] = {
-        "pbmc": "models/LR_level3_no_weight_final_model_metadata.json",
-        "pancreas": "models/pancreas_LR_balanced_level3_final_model_metadata.json",
-    }
+    "pbmc": "models/pbmc/LR_level3_no_weight_final_model_metadata_with_unassigned_threshold_050.json",
+    "pancreas": "models/pancreas/pancreas_LR_balanced_level3_final_model_metadata_with_unassigned_threshold_085.json",
+}
 
     # Only offer tissues that actually have a trained model — "Coming Soon"
     # tissues have no metadata to show.
@@ -435,7 +488,14 @@ with tab_model_info:
         with open(meta_path, "r") as f:
             meta = json.load(f)
 
-        metrics = meta.get("test_metrics", {})
+        metrics = (
+            meta.get("baseline_test_metrics_without_unassigned")
+            or meta.get("test_metrics")
+            or {}
+        )
+
+        unassigned_metrics = meta.get("test_metrics_with_unassigned", {})
+
         preprocessing = meta.get("preprocessing", {})
 
         st.markdown('<div class="card-title">Model Overview</div>', unsafe_allow_html=True)
@@ -840,32 +900,101 @@ with tab_predict:
             st.markdown('<div class="card-title">Predictions Table</div>', unsafe_allow_html=True)
 
             probabilities = st.session_state.get("probabilities")
-            if probabilities is not None:
-                display_df = predictions.copy().reset_index(drop=True)
-                prob_reset = probabilities.reset_index(drop=True)
-                top_score = prob_reset.max(axis=1).map(lambda x: f"{x * 100:.1f}%")
-                display_df["confidence"] = top_score
-            else:
-                display_df = predictions.copy().reset_index(drop=True)
 
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            result_model_info = TISSUE_MODELS.get(result_tissue, {})
+            unassigned_threshold = get_unassigned_threshold(result_model_info)
+
+            if unassigned_threshold is not None:
+                threshold_text = f"{unassigned_threshold:.2f}"
+            else:
+                threshold_text = "the selected model threshold"
+
+            display_predictions = predictions.copy().reset_index(drop=True)
+
+            # Keep one scientific confidence column only.
+            # If confidence_score is missing, derive it from the probability table.
+            if "confidence_score" not in display_predictions.columns and probabilities is not None:
+                prob_reset = probabilities.reset_index(drop=True)
+                display_predictions["confidence_score"] = prob_reset.max(axis=1)
+
+            # Remove backend/helper columns that may confuse users
+            display_predictions = display_predictions.drop(
+                columns=[
+                    col for col in ["is_unassigned", "confidence"]
+                    if col in display_predictions.columns
+                ],
+                errors="ignore",
+            )
+
+            # Rename columns for clearer GUI/download output
+            display_predictions = display_predictions.rename(
+                columns={
+                    "cell_barcode": "cell_barcode",
+                    "predicted_cell_type": "predicted_cell_type",
+                    "predicted_label_before_threshold": "prediction_before_unassigned_threshold",
+                    "confidence_score": "confidence_score",
+                }
+            )
+
+            # Keep only the user-facing columns in a consistent order
+            prediction_table_columns = [
+                "cell_barcode",
+                "predicted_cell_type",
+                "prediction_before_unassigned_threshold",
+                "confidence_score",
+            ]
+
+            display_predictions = display_predictions[
+                [col for col in prediction_table_columns if col in display_predictions.columns]
+            ]
+
+            st.dataframe(
+                display_predictions,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "cell_barcode": st.column_config.TextColumn(
+                        "cell_barcode",
+                        help="Unique barcode or identifier of each cell in the uploaded dataset.",
+                    ),
+                    "predicted_cell_type": st.column_config.TextColumn(
+                       "predicted_cell_type",
+                        help=(
+                              f"Final cell type shown after applying the unassigned threshold "
+                              f"for this model: confidence score ≥ {threshold_text}. "
+                              "Cells below this threshold are shown as Unassigned."
+                        ),
+                    ),
+                    "prediction_before_unassigned_threshold": st.column_config.TextColumn(
+                        "prediction_before_unassigned_threshold",
+                        help=(
+                            f"The model's best predicted cell type before applying the unassigned threshold "
+                            f"for this model: confidence score ≥ {threshold_text}. "
+                            "This helps users inspect what the model would have predicted for low-confidence cells."
+                        ),
+                    ),
+                    "confidence_score": st.column_config.NumberColumn(
+                        "confidence_score",
+                        help=(
+                            "Model confidence score for the prediction, shown as a value between 0 and 1. "
+                            "Higher values indicate stronger model confidence."
+                        ),
+                        format="%.4f",
+                    ),
+                },
+            )
 
             st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
             # ── Download ──────────────────────────────────────────────────────
             st.markdown('<div class="card-title">Download Predictions</div>', unsafe_allow_html=True)
 
-            if probabilities is not None:
-                export_df = predictions.copy().reset_index(drop=True)
-                export_df = pd.concat([export_df, probabilities.reset_index(drop=True)], axis=1)
-            else:
-                export_df = predictions.copy()
+            csv_bytes = display_predictions.to_csv(index=False).encode("utf-8")
 
-            csv_bytes = export_df.to_csv(index=False).encode("utf-8")
             st.download_button(
                 label="⬇  Download Predictions (CSV)",
                 data=csv_bytes,
-                file_name="predicted_cell_types.csv",
+                file_name="cell_type_predictions.csv",
                 mime="text/csv",
             )
 
@@ -1045,26 +1174,42 @@ with tab_predict:
         st.caption("Compare two predicted cell types to find differentially expressed genes.")
 
         available_types = sorted(
-            st.session_state.predictions["predicted_cell_type"].unique().tolist()
+            [
+                ct for ct in st.session_state.predictions["predicted_cell_type"].unique().tolist()
+                if str(ct).lower() != "unassigned"
+            ]
         )
 
-        dge_sel1, dge_sel2, dge_btn_col = st.columns([2, 2, 1])
-
-        with dge_sel1:
-            dge_group1 = st.selectbox("Group 1", options=available_types, key="dge_sel_group1")
-
-        with dge_sel2:
-            group2_opts = [ct for ct in available_types if ct != dge_group1]
-            dge_group2 = st.selectbox(
-                "Group 2",
-                options=group2_opts if group2_opts else available_types,
-                key="dge_sel_group2",
+        if len(available_types) < 2:
+            st.info(
+                "DGE requires at least two predicted biological cell types. "
+                "Unassigned cells are excluded from DGE because they do not represent a biological cell type."
             )
+            run_dge_clicked = False
+            dge_group1 = None
+            dge_group2 = None
 
-        with dge_btn_col:
-            st.markdown("<br>", unsafe_allow_html=True)
-            run_dge_clicked = st.button("▶  Run DGE", use_container_width=True)
+        else:
+            dge_sel1, dge_sel2, dge_btn_col = st.columns([2, 2, 1])
 
+            with dge_sel1:
+                dge_group1 = st.selectbox(
+                    "Group 1",
+                    options=available_types,
+                    key="dge_sel_group1",
+                )
+
+            with dge_sel2:
+                group2_opts = [ct for ct in available_types if ct != dge_group1]
+                dge_group2 = st.selectbox(
+                    "Group 2",
+                    options=group2_opts,
+                    key="dge_sel_group2",
+                )
+
+            with dge_btn_col:
+                st.markdown("<br>", unsafe_allow_html=True)
+                run_dge_clicked = st.button("▶  Run DGE", use_container_width=True)
         if run_dge_clicked:
             with st.spinner(f"Comparing {dge_group1} vs {dge_group2}…"):
                 from backend import run_dge

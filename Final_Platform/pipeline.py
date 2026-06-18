@@ -149,13 +149,17 @@ def run_pipeline(
 
     # Load model bundle (used in Steps 3, 4, 5)
     _TISSUE_BUNDLE_MAP = {
-        "pbmc":     "LR_level3_no_weight_final_model_bundle.joblib",
-        "pancreas": "pancreas_LR_balanced_level3_final_model_bundle.joblib",
-    }
+    "pbmc": Path("pbmc") / "LR_level3_no_weight_final_model_bundle_with_unassigned_threshold_050.joblib",
+    "pancreas": Path("pancreas") / "pancreas_LR_balanced_level3_final_model_bundle_with_unassigned_threshold_085.joblib",
+}
     try:
         import joblib
-        bundle_filename = _TISSUE_BUNDLE_MAP.get(tissue, "LR_level3_no_weight_final_model_bundle.joblib")
-        bundle_path = Path(__file__).parent / "models" / bundle_filename
+        bundle_rel_path = _TISSUE_BUNDLE_MAP.get(tissue)
+
+        if bundle_rel_path is None:
+            raise ValueError(f"No model bundle is configured for tissue: {tissue}")
+
+        bundle_path = Path(__file__).parent / "models" / bundle_rel_path
         bundle = joblib.load(bundle_path)
     except Exception as exc:
         result.error = f"Could not load model bundle: {exc}"
@@ -277,6 +281,9 @@ def run_pipeline(
         label_encoder = bundle["label_encoder"]
         class_names = bundle["class_names"]
 
+        unassigned_threshold = bundle.get("unassigned_threshold", None)
+        unassigned_label = bundle.get("unassigned_label", "Unassigned")
+
         if not hasattr(model, "multi_class"):
             model.multi_class = "auto"
 
@@ -284,26 +291,49 @@ def run_pipeline(
         if sp.issparse(X):
             X = X.toarray()
 
-        predicted_encoded = model.predict(X)
-        predicted_labels = label_encoder.inverse_transform(predicted_encoded)
-
         proba = model.predict_proba(X)
-        result.probabilities = pd.DataFrame(proba, columns=class_names)
 
-        step_msg = f"{len(pd.Series(predicted_labels).unique())} cell types predicted"
+        best_class_indices = np.argmax(proba, axis=1)
+        confidence_scores = np.max(proba, axis=1)
+
+        predicted_labels_before_threshold = label_encoder.inverse_transform(
+            best_class_indices
+        )
+
+        final_labels = predicted_labels_before_threshold.copy().astype(object)
+
+        if unassigned_threshold is not None:
+            final_labels[confidence_scores < unassigned_threshold] = unassigned_label
+
+        result.probabilities = pd.DataFrame(proba, columns=class_names)
 
         result.predictions = pd.DataFrame({
             "cell_barcode": adata.obs_names.tolist(),
-            "predicted_cell_type": predicted_labels,
+            "predicted_cell_type": final_labels,
+            "predicted_label_before_threshold": predicted_labels_before_threshold,
+            "confidence_score": confidence_scores,
+            "is_unassigned": final_labels == unassigned_label,
         })
-        adata.obs["predicted_cell_type"] = predicted_labels
+
+        adata.obs["predicted_cell_type"] = final_labels
+        adata.obs["predicted_label_before_threshold"] = predicted_labels_before_threshold
+        adata.obs["confidence_score"] = confidence_scores
+        adata.obs["is_unassigned"] = final_labels == unassigned_label
+
+        n_unassigned = int(np.sum(final_labels == unassigned_label))
+        n_assigned = int(len(final_labels) - n_unassigned)
+
+        step_msg = (
+            f"{len(pd.Series(final_labels).unique())} labels returned "
+            f"({n_assigned} assigned, {n_unassigned} unassigned)"
+        )
+
         result.steps.append(StepStatus("Predict", True, step_msg))
 
     except Exception as exc:
         result.steps.append(StepStatus("Predict", False, str(exc)))
         result.error = f"Prediction failed: {exc}"
         return result
-
 
     # STEP 6 — PCA + UMAP
 
