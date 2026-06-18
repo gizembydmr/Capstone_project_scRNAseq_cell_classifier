@@ -138,11 +138,16 @@ html, body, [class*="css"] {
 .stat-box {
     flex: 1;
     min-width: 140px;
+    min-height: 100px;
     background: #0d1117;
     border: 1px solid #21262d;
     border-radius: 8px;
     padding: 16px 20px;
     text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
 }
 .stat-value {
     font-size: 28px;
@@ -288,7 +293,7 @@ TISSUE_MODELS: dict[str, dict] = {
                         "Pancreatic A cells (Alpha)", "Pancreatic Acinar cells",
                         "Pancreatic Ductal cells", "Pancreatic Stellate cells",
                         "Type B Pancreatic cells (Beta)"],
-        "model_file": "models/Pancreas_Model/pancreas_LR_balanced_level3_final_model_bundle.joblib",
+        "model_file": "models/pancreas_LR_balanced_level3_final_model_bundle.joblib",
         "description": "Pre-trained on human pancreas scRNA-seq reference data.",
         "available": True,
     },
@@ -394,7 +399,7 @@ with tab_model_info:
     # it. Add new tissues here as their metadata files become available.
     TISSUE_METADATA_PATHS: dict[str, str] = {
         "pbmc": "models/LR_level3_no_weight_final_model_metadata.json",
-        "pancreas": "models/Pancreas_Model/pancreas_LR_balanced_level3_final_model_metadata.json",
+        "pancreas": "models/pancreas_LR_balanced_level3_final_model_metadata.json",
     }
 
     # Only offer tissues that actually have a trained model — "Coming Soon"
@@ -680,7 +685,7 @@ with tab_predict:
         )
 
         if not model_available:
-            st.warning("This tissue model is not yet available. Please select PBMC.")
+            st.warning("This tissue model is not yet available. Please select PBMC or Pancreas.")
         elif run_disabled and uploaded_file is None:
             st.caption("Upload a dataset to enable prediction.")
         elif run_disabled:
@@ -784,9 +789,11 @@ with tab_predict:
             ]
             for col, (val, label) in zip(stat_cols, stats):
                 with col:
+                    # Tissue label can be long (e.g. "Pancreas") — slightly smaller font so it fits on one line
+                    val_style = 'font-size:22px;' if label == "Tissue" else ''
                     st.markdown(f"""
 <div class="stat-box">
-  <div class="stat-value">{val}</div>
+  <div class="stat-value" style="{val_style}">{val}</div>
   <div class="stat-label">{label}</div>
 </div>""", unsafe_allow_html=True)
 
