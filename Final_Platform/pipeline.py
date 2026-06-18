@@ -148,35 +148,17 @@ def run_pipeline(
             progress_callback(msg)
 
     # Load model bundle (used in Steps 3, 4, 5)
-    # Each tissue has its own trained model bundle (LogisticRegression + label
-    # encoder + training gene order + preprocessing params). Add new tissues
-    # here as their bundles become available.
-    TISSUE_MODEL_BUNDLES: Dict[str, str] = {
-        "pbmc": "models/LR_level3_no_weight_final_model_bundle.joblib",
-        "pancreas": "models/Pancreas_Model/pancreas_LR_balanced_level3_final_model_bundle.joblib",
+    _TISSUE_BUNDLE_MAP = {
+        "pbmc":     "LR_level3_no_weight_final_model_bundle.joblib",
+        "pancreas": "pancreas_LR_balanced_level3_final_model_bundle.joblib",
     }
-
-    tissue_key = tissue.lower()
-    bundle_rel_path = TISSUE_MODEL_BUNDLES.get(tissue_key)
-    if bundle_rel_path is None:
-        result.error = (
-            f"No trained model bundle is configured for tissue '{tissue}'. "
-            f"Available tissues: {sorted(TISSUE_MODEL_BUNDLES.keys())}"
-        )
-        return result
-
     try:
         import joblib
-        bundle_path = Path(__file__).parent / bundle_rel_path
-        if not bundle_path.exists():
-            result.error = (
-                f"Model bundle for tissue '{tissue}' not found at '{bundle_path}'. "
-                f"Make sure the file has been placed there."
-            )
-            return result
+        bundle_filename = _TISSUE_BUNDLE_MAP.get(tissue, "LR_level3_no_weight_final_model_bundle.joblib")
+        bundle_path = Path(__file__).parent / "models" / bundle_filename
         bundle = joblib.load(bundle_path)
     except Exception as exc:
-        result.error = f"Could not load model bundle for tissue '{tissue}': {exc}"
+        result.error = f"Could not load model bundle: {exc}"
         return result
 
     # STEP 1 — Load data
