@@ -24,6 +24,8 @@ import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
 import streamlit as st
+from PIL import Image
+import base64
 
 import tempfile
 from data_validation import validate_file, ValidationResult
@@ -50,9 +52,12 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 # Page configuration
 # ─────────────────────────────────────────────────────────────────────────────
+logo = Image.open("/Users/nadiraya/Documents/Capstone_project_scRNAseq_cell_classifier/cell_predict_logo.png")
+logo = logo.resize((64, 64))
+
 st.set_page_config(
-    page_title="CellPredict · Cell Type Prediction",
-    page_icon="🧬",
+    page_title="CellPredict",
+    page_icon=logo,
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -423,11 +428,15 @@ _init_state()
 # Header
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown("""
+ROOT = Path(__file__).resolve().parent.parent
+logo_path = ROOT / "cell_predict_logo.png"
+logo_b64 = base64.b64encode(logo_path.read_bytes()).decode()
+
+st.markdown(f"""
 <div class="header-banner">
-  <div style="font-size:42px; line-height:1">🧬</div>
+  <img src="data:image/png;base64,{logo_b64}" style="width:120px; height:120px; border-radius:8px;">
   <div>
-    <p class="header-title">Cell<span class="accent">Predict</span></p>
+    <p class="header-title" style="font-size:42px;">Cell<span class="accent">Predict</span></p>
     <p class="header-sub">Tissue-Specific Cell Type Prediction · scRNA-seq Analysis Platform</p>
   </div>
 </div>
@@ -560,12 +569,42 @@ with tab_model_info:
 
         with detail_col2:
             st.markdown('<div class="card-title">Preprocessing Parameters</div>', unsafe_allow_html=True)
-            st.markdown(f"- **Target sum:** `{preprocessing.get('target_sum', '—')}`")
-            st.markdown(f"- **Min counts:** `{preprocessing.get('min_counts', '—')}`")
-            st.markdown(f"- **Min genes:** `{preprocessing.get('min_genes', '—')}`")
-            st.markdown(f"- **Normalization:** `{preprocessing.get('normalization', '—')}`")
-            st.markdown(f"- **Log transform:** `{preprocessing.get('log_transform', '—')}`")
-            st.markdown(f"- **Feature selection:** `{preprocessing.get('feature_selection', '—')}`")
+            st.markdown("""
+            <style>
+            .param-list { list-style:none; margin:0; padding:0; }
+            .param-list li {
+                font-family: 'IBM Plex Mono', monospace;
+                font-size: 14px;
+                color: #e6edf3;
+                margin-bottom: 10px;
+                white-space: nowrap;
+            }
+            .param-list li b { font-weight: 600; color: #e6edf3; }
+            .param-list li span.val {
+                color: #58f29b;
+                background: #161b22;
+                border: 1px solid #21262d;
+                border-radius: 4px;
+                padding: 2px 6px;
+                margin-left: 6px;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+            params_html = "<ul class='param-list'>"
+            for label, key in [
+                ("Target sum", "target_sum"),
+                ("Min counts", "min_counts"),
+                ("Min genes", "min_genes"),
+                ("Normalization", "normalization"),
+                ("Log transform", "log_transform"),
+                ("Feature selection", "feature_selection"),
+            ]:
+                value = preprocessing.get(key, "—")
+                params_html += f"<li><b>{label}:</b><span class='val'>{value}</span></li>"
+            params_html += "</ul>"
+
+            st.markdown(params_html, unsafe_allow_html=True)
 
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
