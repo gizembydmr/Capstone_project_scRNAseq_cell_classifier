@@ -52,7 +52,9 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 # Page configuration
 # ─────────────────────────────────────────────────────────────────────────────
-logo = Image.open("/Users/nadiraya/Documents/Capstone_project_scRNAseq_cell_classifier/cell_predict_logo.png")
+ROOT = Path(__file__).resolve().parent.parent
+logo_path = ROOT / "cell_predict_logo.png"
+logo = Image.open(logo_path)
 logo = logo.resize((64, 64))
 
 st.set_page_config(
