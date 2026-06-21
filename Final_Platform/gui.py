@@ -1115,7 +1115,7 @@ with tab_predict:
         shap_group_df  = st.session_state.get("shap_group_df")
 
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">05 · SHAP Gene Importance</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">SHAP Gene Importance</div>', unsafe_allow_html=True)
         st.caption("Which genes drove each cell type prediction? (SHAP LinearExplainer)")
 
         if shap_global_df is not None:
@@ -1206,7 +1206,7 @@ with tab_predict:
     if st.session_state.run_complete and st.session_state.predictions is not None:
 
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">04 · Differential Gene Expression</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">Differential Gene Expression</div>', unsafe_allow_html=True)
         st.caption("Compare two predicted cell types to find differentially expressed genes.")
 
         available_types = sorted(
