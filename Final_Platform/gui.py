@@ -24,6 +24,8 @@ import matplotlib.colors as mcolors
 import numpy as np
 import pandas as pd
 import streamlit as st
+from PIL import Image
+import base64
 
 import tempfile
 from data_validation import validate_file, ValidationResult
@@ -50,9 +52,14 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 # Page configuration
 # ─────────────────────────────────────────────────────────────────────────────
+ROOT = Path(__file__).resolve().parent.parent
+logo_path = ROOT / "cell_predict_logo.png"
+logo = Image.open(logo_path)
+logo = logo.resize((64, 64))
+
 st.set_page_config(
-    page_title="CellPredict · Cell Type Prediction",
-    page_icon="🧬",
+    page_title="CellPredict",
+    page_icon=logo,
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -138,11 +145,16 @@ html, body, [class*="css"] {
 .stat-box {
     flex: 1;
     min-width: 140px;
+    min-height: 100px;
     background: #0d1117;
     border: 1px solid #21262d;
     border-radius: 8px;
     padding: 16px 20px;
     text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
 }
 .stat-value {
     font-size: 28px;
@@ -273,11 +285,33 @@ html, body, [class*="css"] {
 TISSUE_MODELS: dict[str, dict] = {
     "PBMC (Peripheral Blood Mononuclear Cells)": {
         "key": "pbmc",
-        "cell_types": ["B cells", "T cells (CD4+)", "T cells (CD8+)", "NK cells",
-                        "Monocytes (Classical)", "Monocytes (Non-Classical)",
-                        "Dendritic Cells", "Platelets"],
-        "model_file": "models/pbmc_model.pkl",
+        "cell_types": [
+        "B cell",
+        "CD34+ cell",
+        "Dendritic cell",
+        "Monocyte",
+        "NK cell",
+        "Regulatory T cell",
+        "CD4 memory T cell",
+        "CD4 naive T cell",
+        "CD4 helper T cell",
+        "CD8 naive T cell",
+        "CD8 cytotoxic T cell",
+    ],
+        "model_file": "models/pbmc/LR_level3_no_weight_final_model_bundle_with_unassigned_threshold_050.joblib",
         "description": "Pre-trained on 10x Genomics PBMC 3k & 68k datasets.",
+        "available": True,
+    },
+    "Pancreas": {
+        "key": "pancreas",
+        "cell_types": ["B cell", "CD4+ T cell", "CD8+ T cell",
+                        "Classical Monocytes", "Endothelial cells", "Fibroblasts",
+                        "Intermediate Monocytes", "Macrophages", "NK cells",
+                        "Pancreatic A cells (Alpha)", "Pancreatic Acinar cells",
+                        "Pancreatic Ductal cells", "Pancreatic Stellate cells",
+                        "Type B Pancreatic cells (Beta)"],
+        "model_file": "models/pancreas/pancreas_LR_balanced_level3_final_model_bundle_with_unassigned_threshold_085.joblib",
+        "description": "Pre-trained on human pancreas scRNA-seq reference data.",
         "available": True,
     },
     "Lung (Coming Soon)": {
@@ -314,6 +348,49 @@ CELL_PALETTE = [
     "#56d364", "#f0883e", "#a5d6ff", "#d2a8ff",
 ]
 
+def get_unassigned_threshold(model_info: dict) -> float | None:
+    model_path = Path(__file__).parent / model_info["model_file"]
+
+    if not JOBLIB_OK or not model_path.exists():
+        return None
+
+    try:
+        model_bundle = joblib.load(model_path)
+    except Exception:
+        return None
+
+    possible_keys = [
+        "unassigned_threshold",
+        "confidence_threshold",
+        "threshold",
+    ]
+
+    for key in possible_keys:
+        if key in model_bundle:
+            try:
+                return float(model_bundle[key])
+            except (TypeError, ValueError):
+                pass
+
+    preprocessing = model_bundle.get("preprocessing", {})
+    if isinstance(preprocessing, dict):
+        for key in possible_keys:
+            if key in preprocessing:
+                try:
+                    return float(preprocessing[key])
+                except (TypeError, ValueError):
+                    pass
+
+    metadata = model_bundle.get("metadata", {})
+    if isinstance(metadata, dict):
+        for key in possible_keys:
+            if key in metadata:
+                try:
+                    return float(metadata[key])
+                except (TypeError, ValueError):
+                    pass
+
+    return None
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Session state initialisation
@@ -353,11 +430,15 @@ _init_state()
 # Header
 # ─────────────────────────────────────────────────────────────────────────────
 
-st.markdown("""
+ROOT = Path(__file__).resolve().parent.parent
+logo_path = ROOT / "cell_predict_logo.png"
+logo_b64 = base64.b64encode(logo_path.read_bytes()).decode()
+
+st.markdown(f"""
 <div class="header-banner">
-  <div style="font-size:42px; line-height:1">🧬</div>
+  <img src="data:image/png;base64,{logo_b64}" style="width:120px; height:120px; border-radius:8px;">
   <div>
-    <p class="header-title">Cell<span class="accent">Predict</span></p>
+    <p class="header-title" style="font-size:42px;">Cell<span class="accent">Predict</span></p>
     <p class="header-sub">Tissue-Specific Cell Type Prediction · scRNA-seq Analysis Platform</p>
   </div>
 </div>
@@ -378,13 +459,54 @@ tab_predict, tab_model_info = st.tabs(["🔬  Prediction", "📊  Model Info"])
 with tab_model_info:
     import json
 
-    meta_path = Path(__file__).parent / "models" / "LR_level1_no_weight_final_model_metadata.json"
+    # Each tissue's model bundle has a matching metadata JSON sitting next to
+    # it. Add new tissues here as their metadata files become available.
+    TISSUE_METADATA_PATHS: dict[str, str] = {
+    "pbmc": "models/pbmc/LR_level3_no_weight_final_model_metadata_with_unassigned_threshold_050.json",
+    "pancreas": "models/pancreas/pancreas_LR_balanced_level3_final_model_metadata_with_unassigned_threshold_085.json",
+}
 
-    if meta_path.exists():
+    # Only offer tissues that actually have a trained model — "Coming Soon"
+    # tissues have no metadata to show.
+    _info_tissue_options = [
+        name for name, info in TISSUE_MODELS.items() if info.get("available", False)
+    ]
+
+    st.markdown('<div class="card-title">Select Model to Inspect</div>', unsafe_allow_html=True)
+
+    _info_tissue_choice = st.selectbox(
+        "Model",
+        options=_info_tissue_options,
+        index=0,
+        label_visibility="collapsed",
+        key="model_info_tissue_choice",
+        help="Independent of the tissue selected on the Prediction tab — "
+             "browsing here won't change what model is used to run predictions.",
+    )
+
+    _info_tissue_key = TISSUE_MODELS[_info_tissue_choice]["key"]
+    _meta_rel_path = TISSUE_METADATA_PATHS.get(_info_tissue_key)
+
+    st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+    meta_path = (
+        Path(__file__).parent / _meta_rel_path
+        if _meta_rel_path is not None
+        else None
+    )
+
+    if meta_path is not None and meta_path.exists():
         with open(meta_path, "r") as f:
             meta = json.load(f)
 
-        metrics = meta.get("test_metrics", {})
+        metrics = (
+            meta.get("baseline_test_metrics_without_unassigned")
+            or meta.get("test_metrics")
+            or {}
+        )
+
+        unassigned_metrics = meta.get("test_metrics_with_unassigned", {})
+
         preprocessing = meta.get("preprocessing", {})
 
         st.markdown('<div class="card-title">Model Overview</div>', unsafe_allow_html=True)
@@ -449,12 +571,42 @@ with tab_model_info:
 
         with detail_col2:
             st.markdown('<div class="card-title">Preprocessing Parameters</div>', unsafe_allow_html=True)
-            st.markdown(f"- **Target sum:** `{preprocessing.get('target_sum', '—')}`")
-            st.markdown(f"- **Min counts:** `{preprocessing.get('min_counts', '—')}`")
-            st.markdown(f"- **Min genes:** `{preprocessing.get('min_genes', '—')}`")
-            st.markdown(f"- **Normalization:** `{preprocessing.get('normalization', '—')}`")
-            st.markdown(f"- **Log transform:** `{preprocessing.get('log_transform', '—')}`")
-            st.markdown(f"- **Feature selection:** `{preprocessing.get('feature_selection', '—')}`")
+            st.markdown("""
+            <style>
+            .param-list { list-style:none; margin:0; padding:0; }
+            .param-list li {
+                font-family: 'IBM Plex Mono', monospace;
+                font-size: 14px;
+                color: #e6edf3;
+                margin-bottom: 10px;
+                white-space: nowrap;
+            }
+            .param-list li b { font-weight: 600; color: #e6edf3; }
+            .param-list li span.val {
+                color: #58f29b;
+                background: #161b22;
+                border: 1px solid #21262d;
+                border-radius: 4px;
+                padding: 2px 6px;
+                margin-left: 6px;
+            }
+            </style>
+            """, unsafe_allow_html=True)
+
+            params_html = "<ul class='param-list'>"
+            for label, key in [
+                ("Target sum", "target_sum"),
+                ("Min counts", "min_counts"),
+                ("Min genes", "min_genes"),
+                ("Normalization", "normalization"),
+                ("Log transform", "log_transform"),
+                ("Feature selection", "feature_selection"),
+            ]:
+                value = preprocessing.get(key, "—")
+                params_html += f"<li><b>{label}:</b><span class='val'>{value}</span></li>"
+            params_html += "</ul>"
+
+            st.markdown(params_html, unsafe_allow_html=True)
 
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
 
@@ -466,7 +618,15 @@ with tab_model_info:
         st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 
     else:
-        st.warning("Model metadata file not found.")
+        if _meta_rel_path is None:
+            st.warning(
+                f"No metadata file is configured for '{_info_tissue_choice}' yet."
+            )
+        else:
+            st.warning(
+                f"Model metadata file not found for '{_info_tissue_choice}' "
+                f"at '{meta_path}'."
+            )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -560,10 +720,12 @@ with tab_predict:
         tissue_choice = st.selectbox(
             "Tissue",
             options=list(TISSUE_MODELS.keys()),
-            index=0,
+            index=list(TISSUE_MODELS.keys()).index(
+                st.session_state.get("selected_tissue", list(TISSUE_MODELS.keys())[0])
+            ),
             label_visibility="collapsed",
+            key="selected_tissue",
         )
-        st.session_state.selected_tissue = tissue_choice
         model_info = TISSUE_MODELS[tissue_choice]
 
         st.caption(f"ℹ️  {model_info['description']}")
@@ -624,7 +786,7 @@ with tab_predict:
         )
 
         if not model_available:
-            st.warning("This tissue model is not yet available. Please select PBMC.")
+            st.warning("This tissue model is not yet available. Please select PBMC or Pancreas.")
         elif run_disabled and uploaded_file is None:
             st.caption("Upload a dataset to enable prediction.")
         elif run_disabled:
@@ -728,9 +890,11 @@ with tab_predict:
             ]
             for col, (val, label) in zip(stat_cols, stats):
                 with col:
+                    # Tissue label can be long (e.g. "Pancreas") — slightly smaller font so it fits on one line
+                    val_style = 'font-size:22px;' if label == "Tissue" else ''
                     st.markdown(f"""
 <div class="stat-box">
-  <div class="stat-value">{val}</div>
+  <div class="stat-value" style="{val_style}">{val}</div>
   <div class="stat-label">{label}</div>
 </div>""", unsafe_allow_html=True)
 
@@ -777,32 +941,96 @@ with tab_predict:
             st.markdown('<div class="card-title">Predictions Table</div>', unsafe_allow_html=True)
 
             probabilities = st.session_state.get("probabilities")
-            if probabilities is not None:
-                display_df = predictions.copy().reset_index(drop=True)
+
+            result_model_info = TISSUE_MODELS.get(result_tissue, {})
+            unassigned_threshold = get_unassigned_threshold(result_model_info)
+
+            if unassigned_threshold is not None:
+                threshold_text = f"{unassigned_threshold:.2f}"
+            else:
+                threshold_text = "the selected model threshold"
+
+            display_predictions = predictions.copy().reset_index(drop=True)
+
+            # Keep one scientific confidence column only.
+            # If confidence_score is missing, derive it from the probability table.
+            if "confidence_score" not in display_predictions.columns and probabilities is not None:
                 prob_reset = probabilities.reset_index(drop=True)
-                top_score = prob_reset.max(axis=1).map(lambda x: f"{x * 100:.1f}%")
-                display_df["confidence"] = top_score
-            else:
-                display_df = predictions.copy().reset_index(drop=True)
+                display_predictions["confidence_score"] = prob_reset.max(axis=1)
 
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            # Remove backend/helper columns that may confuse users
+            display_predictions = display_predictions.drop(
+                columns=[
+                    col for col in ["is_unassigned", "confidence"]
+                    if col in display_predictions.columns
+                ],
+                errors="ignore",
+            )
 
-            st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+            # Rename columns for clearer GUI/download output
+            display_predictions = display_predictions.rename(
+                columns={
+                    "cell_barcode": "cell_barcode",
+                    "predicted_cell_type": "predicted_cell_type",
+                    "predicted_label_before_threshold": "prediction_before_unassigned_threshold",
+                    "confidence_score": "confidence_score",
+                }
+            )
 
-            # ── Download ──────────────────────────────────────────────────────
-            st.markdown('<div class="card-title">Download Predictions</div>', unsafe_allow_html=True)
+            # Keep only the user-facing columns in a consistent order
+            prediction_table_columns = [
+                "cell_barcode",
+                "predicted_cell_type",
+                "prediction_before_unassigned_threshold",
+                "confidence_score",
+            ]
 
-            if probabilities is not None:
-                export_df = predictions.copy().reset_index(drop=True)
-                export_df = pd.concat([export_df, probabilities.reset_index(drop=True)], axis=1)
-            else:
-                export_df = predictions.copy()
+            display_predictions = display_predictions[
+                [col for col in prediction_table_columns if col in display_predictions.columns]
+            ]
 
-            csv_bytes = export_df.to_csv(index=False).encode("utf-8")
+            st.dataframe(
+                display_predictions,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "cell_barcode": st.column_config.TextColumn(
+                        "cell_barcode",
+                        help="Unique barcode or identifier of each cell in the uploaded dataset.",
+                    ),
+                    "predicted_cell_type": st.column_config.TextColumn(
+                       "predicted_cell_type",
+                        help=(
+                              f"Final cell type shown after applying the unassigned threshold "
+                              f"for this model: confidence score ≥ {threshold_text}. "
+                              "Cells below this threshold are shown as Unassigned."
+                        ),
+                    ),
+                    "prediction_before_unassigned_threshold": st.column_config.TextColumn(
+                        "prediction_before_unassigned_threshold",
+                        help=(
+                            f"The model's best predicted cell type before applying the unassigned threshold "
+                            f"for this model: confidence score ≥ {threshold_text}. "
+                            "This helps users inspect what the model would have predicted for low-confidence cells."
+                        ),
+                    ),
+                    "confidence_score": st.column_config.NumberColumn(
+                        "confidence_score",
+                        help=(
+                            "Model confidence score for the prediction, shown as a value between 0 and 1. "
+                            "Higher values indicate stronger model confidence."
+                        ),
+                        format="%.4f",
+                    ),
+                },
+            )
+
+            csv_bytes = display_predictions.to_csv(index=False).encode("utf-8")
+
             st.download_button(
                 label="⬇  Download Predictions (CSV)",
                 data=csv_bytes,
-                file_name="predicted_cell_types.csv",
+                file_name="cell_type_predictions.csv",
                 mime="text/csv",
             )
 
@@ -887,7 +1115,7 @@ with tab_predict:
         shap_group_df  = st.session_state.get("shap_group_df")
 
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">05 · SHAP Gene Importance</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">SHAP Gene Importance</div>', unsafe_allow_html=True)
         st.caption("Which genes drove each cell type prediction? (SHAP LinearExplainer)")
 
         if shap_global_df is not None:
@@ -978,30 +1206,46 @@ with tab_predict:
     if st.session_state.run_complete and st.session_state.predictions is not None:
 
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-        st.markdown('<div class="card-title">04 · Differential Gene Expression</div>', unsafe_allow_html=True)
+        st.markdown('<div class="card-title">Differential Gene Expression</div>', unsafe_allow_html=True)
         st.caption("Compare two predicted cell types to find differentially expressed genes.")
 
         available_types = sorted(
-            st.session_state.predictions["predicted_cell_type"].unique().tolist()
+            [
+                ct for ct in st.session_state.predictions["predicted_cell_type"].unique().tolist()
+                if str(ct).lower() != "unassigned"
+            ]
         )
 
-        dge_sel1, dge_sel2, dge_btn_col = st.columns([2, 2, 1])
-
-        with dge_sel1:
-            dge_group1 = st.selectbox("Group 1", options=available_types, key="dge_sel_group1")
-
-        with dge_sel2:
-            group2_opts = [ct for ct in available_types if ct != dge_group1]
-            dge_group2 = st.selectbox(
-                "Group 2",
-                options=group2_opts if group2_opts else available_types,
-                key="dge_sel_group2",
+        if len(available_types) < 2:
+            st.info(
+                "DGE requires at least two predicted biological cell types. "
+                "Unassigned cells are excluded from DGE because they do not represent a biological cell type."
             )
+            run_dge_clicked = False
+            dge_group1 = None
+            dge_group2 = None
 
-        with dge_btn_col:
-            st.markdown("<br>", unsafe_allow_html=True)
-            run_dge_clicked = st.button("▶  Run DGE", use_container_width=True)
+        else:
+            dge_sel1, dge_sel2, dge_btn_col = st.columns([2, 2, 1])
 
+            with dge_sel1:
+                dge_group1 = st.selectbox(
+                    "Group 1",
+                    options=available_types,
+                    key="dge_sel_group1",
+                )
+
+            with dge_sel2:
+                group2_opts = [ct for ct in available_types if ct != dge_group1]
+                dge_group2 = st.selectbox(
+                    "Group 2",
+                    options=group2_opts,
+                    key="dge_sel_group2",
+                )
+
+            with dge_btn_col:
+                st.markdown("<br>", unsafe_allow_html=True)
+                run_dge_clicked = st.button("▶  Run DGE", use_container_width=True)
         if run_dge_clicked:
             with st.spinner(f"Comparing {dge_group1} vs {dge_group2}…"):
                 from backend import run_dge
