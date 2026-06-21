@@ -1025,11 +1025,6 @@ with tab_predict:
                 },
             )
 
-            st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-
-            # ── Download ──────────────────────────────────────────────────────
-            st.markdown('<div class="card-title">Download Predictions</div>', unsafe_allow_html=True)
-
             csv_bytes = display_predictions.to_csv(index=False).encode("utf-8")
 
             st.download_button(
