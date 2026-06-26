@@ -8,6 +8,10 @@ This project is a tissue-specific cell type prediction platform for single-cell 
 
 The main value of the project is that it allows users to upload scRNA-seq data, run trained tissue-specific models, inspect predictions, visualize cell populations, and export biological interpretation outputs without needing to manually run multiple bioinformatics scripts.
 
+## Final Platform
+
+All necessary files required to run the final integrated application are located inside the `Final_Platform/` folder. This folder also includes the usage guide, final GUI/backend files, trained model files, requirements, and supporting components needed to launch and test the platform.
+
 ## Repository Structure and Task Distribution
 
 - `src/ml_model/`, `src/Pancreas_Model/`, `src/preprocessing/`  
